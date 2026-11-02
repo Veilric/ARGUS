@@ -3,11 +3,14 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"argus/internal/config"
+	"argus/internal/dhcp"
 	"argus/internal/diagnostics"
 	"argus/internal/discovery"
 	"argus/internal/platform"
@@ -745,6 +748,400 @@ func TestScanConfirmationRenderedDimensionsAndContents(t *testing.T) {
 		})
 	}
 }
+
+type mockTUIDHCPInspector struct {
+	cfg *dhcp.DHCPConfig
+}
+
+func (m *mockTUIDHCPInspector) Inspect(ifaceName string) (*dhcp.DHCPConfig, error) {
+	return m.cfg, nil
+}
+
+func setupTestModelWithDHCP(t *testing.T) (*Model, *dhcp.BaselineStore, *mockTUIDHCPInspector, string) {
+	t.Helper()
+	m := setupTestModel()
+	tmpDir := t.TempDir()
+	baselinePath := filepath.Join(tmpDir, "baselines.json")
+	store, err := dhcp.NewBaselineStore(baselinePath)
+	if err != nil {
+		t.Fatalf("failed to create baseline store: %v", err)
+	}
+
+	initialCfg := &dhcp.DHCPConfig{
+		InterfaceName: "eth0",
+		MACAddress:    "02:00:00:00:00:01",
+		IPv4Address:   "192.168.1.100",
+		IPv4Prefix:    24,
+		Assignment:    dhcp.AssignmentDHCP,
+		GatewayIP:     "192.168.1.1",
+		DNSServers:    []string{"192.168.1.1"},
+		DHCPServerIP:  "192.168.1.1",
+		ObservedAt:    time.Now(),
+	}
+	_, err = store.EstablishInitial(initialCfg)
+	if err != nil {
+		t.Fatalf("failed to establish initial baseline: %v", err)
+	}
+
+	inspector := &mockTUIDHCPInspector{cfg: initialCfg}
+	m.poller.SetDHCPComponents(store, inspector)
+	m.ifaceName = "eth0"
+
+	// Probe once to populate status
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	m.poller.ProbeOnce(ctx)
+
+	res, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	return res.(*Model), store, inspector, baselinePath
+}
+
+// Priority 1 Test 1: Page Up and lowercase 'b' must only perform scrolling and never trigger baseline refresh.
+func TestKeybindingSeparation_PgUpAndB_ScrollOnly(t *testing.T) {
+	m, store, _, _ := setupTestModelWithDHCP(t)
+
+	// Switch to Tab 1 (Deep Diagnostics)
+	res, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	m = res.(*Model)
+	if m.activeTab != 1 {
+		t.Fatalf("expected activeTab = 1, got %d", m.activeTab)
+	}
+
+	// Scroll down first so there is room to scroll up
+	res, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = res.(*Model)
+	res, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = res.(*Model)
+
+	// Send lowercase 'b' (intended for viewport scroll up)
+	res, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	m = res.(*Model)
+
+	if m.showBaselineConfirm {
+		t.Errorf("lowercase 'b' must NOT open baseline confirmation dialog")
+	}
+	if strings.Contains(m.toastMsg, "Baseline refreshed") {
+		t.Errorf("lowercase 'b' triggered unexpected baseline refresh: %s", m.toastMsg)
+	}
+
+	// Send Page Up
+	res, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = res.(*Model)
+
+	if m.showBaselineConfirm {
+		t.Errorf("Page Up must NOT open baseline confirmation dialog")
+	}
+	if strings.Contains(m.toastMsg, "Baseline refreshed") {
+		t.Errorf("Page Up triggered unexpected baseline refresh: %s", m.toastMsg)
+	}
+
+	// Verify stored baseline remains Initial Observed
+	b, ok := store.Get("eth0")
+	if !ok || b == nil {
+		t.Fatalf("baseline disappeared")
+	}
+	if b.Type != dhcp.BaselineInitialObserved {
+		t.Errorf("expected baseline type %s, got %s", dhcp.BaselineInitialObserved, b.Type)
+	}
+}
+
+// Priority 1 Test 2: Uppercase [B] and [ctrl+b] open confirmation dialog without immediate writing.
+func TestBaselineConfirmation_KeyB_OpensConfirmationDialog(t *testing.T) {
+	m, store, _, baselinePath := setupTestModelWithDHCP(t)
+
+	fiBefore, _ := os.Stat(baselinePath)
+	modBefore := fiBefore.ModTime()
+
+	// Press [B]
+	res, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'B'}})
+	m = res.(*Model)
+
+	if !m.showBaselineConfirm {
+		t.Fatalf("expected showBaselineConfirm = true after pressing [B]")
+	}
+	if m.pendingBaselineCfg == nil {
+		t.Fatalf("expected pendingBaselineCfg to be populated")
+	}
+
+	// File on disk must NOT have been overwritten yet!
+	fiAfter, _ := os.Stat(baselinePath)
+	if fiAfter.ModTime().After(modBefore) {
+		t.Errorf("baseline file was modified before user confirmed!")
+	}
+
+	// Baseline in store must still be initial observed
+	b, _ := store.Get("eth0")
+	if b.Type != dhcp.BaselineInitialObserved {
+		t.Errorf("baseline type modified prematurely: %s", b.Type)
+	}
+}
+
+// Priority 1 Test 3: Cancelling confirmation with [Esc] or [N] leaves stored baseline unchanged.
+func TestBaselineConfirmation_Cancel_LeavesBaselineUnchanged(t *testing.T) {
+	m, store, _, _ := setupTestModelWithDHCP(t)
+
+	// Press [B] to open confirmation modal
+	res, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'B'}})
+	m = res.(*Model)
+	if !m.showBaselineConfirm {
+		t.Fatalf("expected showBaselineConfirm = true")
+	}
+
+	// Press [Esc] to cancel
+	res, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m = res.(*Model)
+
+	if m.showBaselineConfirm {
+		t.Errorf("expected showBaselineConfirm = false after pressing [Esc]")
+	}
+	if m.pendingBaselineCfg != nil {
+		t.Errorf("expected pendingBaselineCfg = nil after cancellation")
+	}
+	if !strings.Contains(m.toastMsg, "cancelled") {
+		t.Errorf("expected cancellation toast, got: %s", m.toastMsg)
+	}
+
+	b, _ := store.Get("eth0")
+	if b.Type != dhcp.BaselineInitialObserved {
+		t.Errorf("baseline changed after cancellation: %s", b.Type)
+	}
+}
+
+// Priority 1 Test 4: Confirming refresh creates backup and updates to User-Confirmed baseline.
+func TestBaselineConfirmation_Confirm_UpdatesOnlyTargetInterface(t *testing.T) {
+	m, store, _, baselinePath := setupTestModelWithDHCP(t)
+
+	// Press [B] to open confirmation
+	res, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'B'}})
+	m = res.(*Model)
+
+	// Press [Enter] to confirm
+	res, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = res.(*Model)
+
+	if m.showBaselineConfirm {
+		t.Errorf("expected showBaselineConfirm = false after confirmation")
+	}
+	if !strings.Contains(m.toastMsg, "User-confirmed baseline established") {
+		t.Errorf("expected confirmation toast, got: %s", m.toastMsg)
+	}
+
+	// Verify backup file exists
+	bakPath := baselinePath + ".bak"
+	if _, err := os.Stat(bakPath); err != nil {
+		t.Errorf("expected backup file %s to exist: %v", bakPath, err)
+	}
+
+	// Verify baseline type is now USER_CONFIRMED
+	b, ok := store.Get("eth0")
+	if !ok || b == nil {
+		t.Fatalf("expected baseline for eth0")
+	}
+	if b.Type != dhcp.BaselineUserConfirmed {
+		t.Errorf("expected baseline type %s, got %s", dhcp.BaselineUserConfirmed, b.Type)
+	}
+}
+
+// Priority 1 Test 5: Undersized terminal blocks confirmation and warns user.
+func TestBaselineConfirmation_UndersizedTerminal_BlocksConfirmation(t *testing.T) {
+	m, store, _, _ := setupTestModelWithDHCP(t)
+
+	// Open confirmation modal
+	res, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'B'}})
+	m = res.(*Model)
+
+	// Shrink window to undersized dimensions
+	res, _ = m.Update(tea.WindowSizeMsg{Width: 35, Height: 8})
+	m = res.(*Model)
+
+	// Attempt to confirm with [Enter]
+	res, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = res.(*Model)
+
+	if !strings.Contains(m.toastMsg, "Window too small") {
+		t.Errorf("expected 'Window too small' toast on undersized confirm attempt, got: %s", m.toastMsg)
+	}
+
+	// Stored baseline must remain initial observed
+	b, _ := store.Get("eth0")
+	if b.Type != dhcp.BaselineInitialObserved {
+		t.Errorf("undersized confirmation was not blocked: %s", b.Type)
+	}
+}
+
+// Priority 1 Test 6: Mutual exclusion between scan confirmation and baseline confirmation.
+func TestBaselineConfirmation_MutualExclusionWithScanConfirmation(t *testing.T) {
+	m, _, _, _ := setupTestModelWithDHCP(t)
+
+	// Open scan confirmation by pressing [S]
+	res, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = res.(*Model)
+	if !m.showScanConfirm {
+		t.Fatalf("expected showScanConfirm = true")
+	}
+
+	// Pressing [B] while scan confirmation is open must be ignored
+	res, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'B'}})
+	m = res.(*Model)
+	if m.showBaselineConfirm {
+		t.Errorf("baseline confirmation opened while scan confirmation was active!")
+	}
+
+	// Cancel scan confirmation
+	res, _ = m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m = res.(*Model)
+
+	// Now open baseline confirmation
+	res, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'B'}})
+	m = res.(*Model)
+	if !m.showBaselineConfirm {
+		t.Fatalf("expected showBaselineConfirm = true")
+	}
+
+	// Pressing [S] while baseline confirmation is open must be ignored
+	res, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = res.(*Model)
+	if m.showScanConfirm {
+		t.Errorf("scan confirmation opened while baseline confirmation was active!")
+	}
+}
+
+// Priority 1 Test 7: Validate rendered dimensions and contents of baseline confirmation across sizes.
+func TestBaselineConfirmation_RenderedDimensionsAndContents(t *testing.T) {
+	testSizes := []struct {
+		name   string
+		width  int
+		height int
+	}{
+		{"Compact 40x12", 40, 12},
+		{"Narrow 50x16", 50, 16},
+		{"Medium 65x22", 65, 22},
+		{"Standard 80x24", 80, 24},
+		{"Large 100x30", 100, 30},
+		{"Wide 120x40", 120, 40},
+	}
+
+	for _, tc := range testSizes {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _, _, _ := setupTestModelWithDHCP(t)
+			res, _ := m.Update(tea.WindowSizeMsg{Width: tc.width, Height: tc.height})
+			m = res.(*Model)
+
+			// Press [B] to trigger baseline confirmation modal
+			res, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'B'}})
+			m = res.(*Model)
+
+			if !m.showBaselineConfirm {
+				t.Fatalf("[%s] expected showBaselineConfirm = true", tc.name)
+			}
+
+			view := m.View()
+			renderedLines := lipgloss.Height(view)
+			renderedCols := lipgloss.Width(view)
+
+			if renderedLines > tc.height {
+				t.Fatalf("[%s] Vertical overflow! Rendered lines %d > terminal height %d\nView:\n%s",
+					tc.name, renderedLines, tc.height, view)
+			}
+			if renderedCols > tc.width {
+				t.Fatalf("[%s] Horizontal overflow! Rendered cols %d > terminal width %d\nView:\n%s",
+					tc.name, renderedCols, tc.width, view)
+			}
+
+			// Essential elements check
+			requiredElements := []string{
+				"BASELINE",
+				"eth0",
+				"Confirm",
+				"Cancel",
+			}
+			for _, elem := range requiredElements {
+				if !strings.Contains(view, elem) {
+					t.Errorf("[%s] Missing essential element %q in view:\n%s", tc.name, elem, view)
+				}
+			}
+
+			// Scroll test
+			res, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+			m = res.(*Model)
+			res, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+			m = res.(*Model)
+
+			// Cancel confirmation with [N]
+			res, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+			m = res.(*Model)
+			if m.showBaselineConfirm {
+				t.Fatalf("[%s] expected showBaselineConfirm = false after cancel", tc.name)
+			}
+		})
+	}
+}
+
+// Regression Test: When live network configuration changes while confirmation modal is open,
+// confirmation MUST be cancelled and stored baseline left unchanged.
+func TestBaselineConfirmation_LiveConfigChangesWhileDialogOpen_CancelsConfirmation(t *testing.T) {
+	m, store, inspector, baselinePath := setupTestModelWithDHCP(t)
+
+	// Press [B] to open confirmation modal
+	res, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'B'}})
+	m = res.(*Model)
+
+	if !m.showBaselineConfirm {
+		t.Fatalf("expected showBaselineConfirm = true")
+	}
+	if m.pendingBaselineCfg == nil {
+		t.Fatalf("expected pendingBaselineCfg to be populated")
+	}
+	if m.pendingBaselineCfg.GatewayIP != "192.168.1.1" {
+		t.Fatalf("expected pending gateway 192.168.1.1, got %s", m.pendingBaselineCfg.GatewayIP)
+	}
+
+	// Live network changes while dialog is open (e.g. gateway moves to 192.168.1.254)
+	changedCfg := *inspector.cfg
+	changedCfg.GatewayIP = "192.168.1.254"
+	inspector.cfg = &changedCfg
+
+	// Live probe updates heartbeat poller status
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	m.poller.ProbeOnce(ctx)
+
+	// User now presses [Enter] to confirm what they saw
+	res, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = res.(*Model)
+
+	// Dialog should close
+	if m.showBaselineConfirm {
+		t.Errorf("expected showBaselineConfirm = false after enter")
+	}
+	if m.pendingBaselineCfg != nil {
+		t.Errorf("expected pendingBaselineCfg = nil after enter")
+	}
+
+	// Toast must indicate cancellation due to configuration change
+	if !strings.Contains(m.toastMsg, "cancelled") || !strings.Contains(m.toastMsg, "live network configuration changed") {
+		t.Errorf("expected cancellation toast mentioning live network configuration changed, got: %s", m.toastMsg)
+	}
+
+	// Stored baseline MUST still be initial observed with original gateway
+	b, ok := store.Get("eth0")
+	if !ok || b == nil {
+		t.Fatalf("baseline disappeared")
+	}
+	if b.Type != dhcp.BaselineInitialObserved {
+		t.Errorf("baseline was overwritten despite network change: type=%s", b.Type)
+	}
+	if b.GatewayIP != "192.168.1.1" {
+		t.Errorf("baseline gateway was modified: got %s", b.GatewayIP)
+	}
+
+	// Backup file must NOT have been created
+	bakPath := baselinePath + ".bak"
+	if _, err := os.Stat(bakPath); !os.IsNotExist(err) {
+		t.Errorf("backup file should not have been created when confirmation was cancelled")
+	}
+}
+
 
 
 

@@ -25,6 +25,8 @@ reports/*
 *.swo
 .~lock.*
 .#*
+*.zip
+dist/*.zip
 
 # Operating System & IDE Artifacts
 .DS_Store

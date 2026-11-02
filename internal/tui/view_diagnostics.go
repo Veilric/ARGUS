@@ -120,11 +120,15 @@ func renderDHCPSection(m *Model, cardWidth, textWidth int) string {
 	baselineStatus := "No Baseline Established"
 	baselineColor := ColorMuted
 	if baseline != nil {
+		typeLabel := "Initial Observed"
+		if baseline.Type == dhcp.BaselineUserConfirmed {
+			typeLabel = "User-Confirmed"
+		}
 		if len(pipe.RecentChanges) > 0 {
-			baselineStatus = fmt.Sprintf("Configuration Drift Detected (%d change(s))", len(pipe.RecentChanges))
+			baselineStatus = fmt.Sprintf("Drift Detected (%s, %d change(s))", typeLabel, len(pipe.RecentChanges))
 			baselineColor = ColorAmber
 		} else {
-			baselineStatus = fmt.Sprintf("Baseline Stable (Established: %s)", baseline.EstablishedAt.Format("15:04:05"))
+			baselineStatus = fmt.Sprintf("Stable (%s, Established: %s)", typeLabel, baseline.EstablishedAt.Format("15:04:05"))
 			baselineColor = ColorEmerald
 		}
 	}
@@ -138,7 +142,7 @@ func renderDHCPSection(m *Model, cardWidth, textWidth int) string {
 		}
 	}
 
-	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(ColorMuted).Render("Press [B] to refresh baseline for current interface"))
+	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(ColorMuted).Render("Press [B] to manage baseline (requires confirmation)"))
 
 	return CardStyle.Width(cardWidth).Render(sb.String())
 }

@@ -93,36 +93,56 @@ func (p *Poller) SetDHCPComponents(store *dhcp.BaselineStore, inspector dhcp.Ins
 	p.changeTracker = dhcp.NewChangeTracker()
 }
 
-// RefreshBaseline explicitly re-establishes the baseline from current observations.
-func (p *Poller) RefreshBaseline(ifaceName string) (*dhcp.ConfigBaseline, error) {
+// ConfirmBaselineSnapshot validates that the current live configuration strictly matches the exact reviewed
+// configuration snapshot, then establishes the confirmed baseline and creates a recovery backup.
+// If the network configuration changed while review was pending, it returns an error and aborts.
+func (p *Poller) ConfirmBaselineSnapshot(reviewedCfg *dhcp.DHCPConfig) (*dhcp.ConfigBaseline, error) {
+	if reviewedCfg == nil || reviewedCfg.InterfaceName == "" {
+		return nil, fmt.Errorf("no reviewed configuration provided")
+	}
+
 	p.mu.RLock()
 	store := p.baselineStore
-	inspector := p.dhcpInspector
-	cfg := p.status.DHCPConfig
+	liveCfg := p.status.DHCPConfig
 	p.mu.RUnlock()
 
 	if store == nil {
 		return nil, fmt.Errorf("baseline store not initialized")
 	}
-	if cfg == nil && inspector != nil {
-		var err error
-		cfg, err = inspector.Inspect(ifaceName)
-		if err != nil {
-			return nil, err
-		}
+
+	// Validate that current live configuration still matches the reviewed snapshot
+	if liveCfg == nil || !dhcp.ConfigEquals(liveCfg, reviewedCfg) {
+		return nil, fmt.Errorf("live network configuration changed during review")
 	}
-	if cfg == nil {
-		return nil, fmt.Errorf("no current configuration available to establish baseline")
+
+	b, err := store.EstablishConfirmed(reviewedCfg)
+	if err != nil {
+		return nil, err
 	}
-	b, err := store.Establish(cfg)
-	if err == nil {
-		p.mu.Lock()
-		p.status.Baseline = b
-		p.status.RecentChanges = nil
-		p.mu.Unlock()
-		p.LogEvent(fmt.Sprintf("[BASELINE] Network configuration baseline refreshed for %s", ifaceName))
+
+	p.mu.Lock()
+	p.status.Baseline = b
+	p.status.RecentChanges = nil
+	if p.changeTracker != nil {
+		p.changeTracker.Reset(reviewedCfg.InterfaceName)
 	}
-	return b, err
+	p.mu.Unlock()
+
+	p.LogEvent(fmt.Sprintf("[BASELINE] User-confirmed baseline established for %s (backup saved)", reviewedCfg.InterfaceName))
+	return b, nil
+}
+
+// ConfirmBaseline explicitly establishes a user-confirmed baseline from current observations and saves a backup.
+func (p *Poller) ConfirmBaseline(ifaceName string) (*dhcp.ConfigBaseline, error) {
+	p.mu.RLock()
+	cfg := p.status.DHCPConfig
+	p.mu.RUnlock()
+	return p.ConfirmBaselineSnapshot(cfg)
+}
+
+// RefreshBaseline explicitly re-establishes the baseline from current observations.
+func (p *Poller) RefreshBaseline(ifaceName string) (*dhcp.ConfigBaseline, error) {
+	return p.ConfirmBaseline(ifaceName)
 }
 
 func (p *Poller) GatewayBuffer() *RingBuffer {
@@ -166,6 +186,12 @@ func (p *Poller) LogEvent(msg string) {
 // Stop logs the termination event and stops the poller.
 func (p *Poller) Stop() {
 	p.LogEvent("[INFO] Real-time telemetry monitoring stopped")
+	p.mu.Lock()
+	store := p.baselineStore
+	p.mu.Unlock()
+	if store != nil {
+		_ = store.Flush()
+	}
 	select {
 	case <-p.stopCh:
 	default:
@@ -334,23 +360,27 @@ func (p *Poller) ProbeOnce(ctx context.Context) PipelineStatus {
 			if p.baselineStore != nil {
 				if b, ok := p.baselineStore.Get(iface.Name); ok && b != nil {
 					status.Baseline = b
-					changes := dhcp.DetectChanges(b, cfg)
-					if len(changes) > 0 {
-						status.RecentChanges = changes
-						if p.changeTracker != nil {
-							newChanges := p.changeTracker.FilterNewChanges(changes)
-							for _, chg := range newChanges {
-								if p.tracker != nil {
-									p.tracker.RecordConfigChange(chg)
-								}
+					if p.changeTracker != nil {
+						trackedEvents := p.changeTracker.Track(b, cfg)
+						for _, chg := range trackedEvents {
+							if p.tracker != nil {
+								p.tracker.RecordConfigChange(chg)
+							}
+							if chg.Kind == dhcp.ChangeRestored {
+								p.LogEvent(fmt.Sprintf("[RECOV] %s", chg.Summary))
+							} else {
 								p.LogEvent(fmt.Sprintf("[CONFIG] %s (%s)", chg.Summary, chg.Implication))
 							}
 						}
 					}
-					_ = p.baselineStore.UpdateLastSeen(iface.Name, time.Now())
+					// Active drift summary for UI display
+					status.RecentChanges = dhcp.DetectChanges(b, cfg)
+
+					// Touch last seen in memory (avoids continuous disk write churn)
+					_ = p.baselineStore.TouchLastSeen(iface.Name, time.Now())
 				} else {
-					// Automatically establish baseline if none exists
-					if newB, err := p.baselineStore.Establish(cfg); err == nil {
+					// Automatically establish initial baseline if none exists
+					if newB, err := p.baselineStore.EstablishInitial(cfg); err == nil {
 						status.Baseline = newB
 						p.LogEvent(fmt.Sprintf("[BASELINE] Initial baseline established for %s", iface.Name))
 					}

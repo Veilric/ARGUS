@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"argus/internal/config"
+	"argus/internal/dhcp"
 	"argus/internal/diagnostics"
 	"argus/internal/discovery"
 	"argus/internal/platform"
@@ -91,6 +92,13 @@ type Model struct {
 	pendingSweepPlan      *discovery.SweepPlan
 	sweepCancel           context.CancelFunc
 	savedDeviceScrollY    int
+
+	// Baseline confirmation state
+	showBaselineConfirm    bool
+	baselineConfirmVp      viewport.Model
+	baselineConfirmVpReady bool
+	pendingBaselineCfg     *dhcp.DHCPConfig
+	pendingOldBaseline     *dhcp.ConfigBaseline
 
 	// Toast notification
 	toastMsg              string
@@ -191,7 +199,7 @@ func (m *Model) updateViewportDimensions() {
 }
 
 func (m *Model) refreshActiveTabContent() {
-	if !m.viewportReady || m.showScanConfirm {
+	if !m.viewportReady || m.showScanConfirm || m.showBaselineConfirm {
 		return
 	}
 	vpWidth := m.width
@@ -216,7 +224,7 @@ func (m *Model) refreshActiveTabContent() {
 }
 
 func (m *Model) refreshAllTabContents() {
-	if !m.viewportReady || m.showScanConfirm {
+	if !m.viewportReady || m.showScanConfirm || m.showBaselineConfirm {
 		return
 	}
 	vpWidth := m.width
@@ -326,6 +334,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 				return m, tea.Batch(cmds...)
 			}
+			if m.showBaselineConfirm && m.pendingBaselineCfg != nil {
+				headerStr := m.renderHeader(m.width)
+				tabsStr := m.renderTabs(m.width)
+				footerStr := m.renderFooter(m.width)
+				availHeight := m.height - lipgloss.Height(headerStr) - lipgloss.Height(tabsStr) - lipgloss.Height(footerStr)
+
+				if m.height < 12 || m.width < 40 || availHeight < 6 {
+					m.toastMsg = "Window too small: resize terminal to at least 40x12 to review baseline before confirming"
+					return m, nil
+				}
+				reviewedCfg := m.pendingBaselineCfg
+				m.showBaselineConfirm = false
+				m.pendingBaselineCfg = nil
+				m.pendingOldBaseline = nil
+
+				if m.poller != nil {
+					b, err := m.poller.ConfirmBaselineSnapshot(reviewedCfg)
+					if err == nil && b != nil {
+						m.toastMsg = fmt.Sprintf("User-confirmed baseline established for %s (backup saved)", m.ifaceName)
+					} else if err != nil {
+						m.toastMsg = fmt.Sprintf("Baseline confirmation cancelled: %v", err)
+						m.poller.LogEvent(fmt.Sprintf("[BASELINE] Confirmation aborted for %s: %v", m.ifaceName, err))
+					}
+				}
+				m.refreshAllTabContents()
+				return m, nil
+			}
 
 		case "esc":
 			if m.showScanConfirm {
@@ -336,6 +371,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.viewports[2].SetYOffset(m.savedDeviceScrollY)
 				}
 				m.toastMsg = "Subnet sweep cancelled before starting."
+				m.refreshActiveTabContent()
+				return m, nil
+			}
+			if m.showBaselineConfirm {
+				m.showBaselineConfirm = false
+				m.pendingBaselineCfg = nil
+				m.pendingOldBaseline = nil
+				m.toastMsg = "Baseline refresh cancelled. Stored baseline unchanged."
 				m.refreshActiveTabContent()
 				return m, nil
 			}
@@ -358,6 +401,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshActiveTabContent()
 				return m, nil
 			}
+			if m.showBaselineConfirm {
+				m.showBaselineConfirm = false
+				m.pendingBaselineCfg = nil
+				m.pendingOldBaseline = nil
+				m.toastMsg = "Baseline refresh cancelled. Stored baseline unchanged."
+				m.refreshActiveTabContent()
+				return m, nil
+			}
 
 		case "c", "C":
 			if (m.scanState == ScanStateStarting || m.scanState == ScanStateRunning || m.scanner.IsScanning()) && m.sweepCancel != nil {
@@ -368,46 +419,46 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "tab":
-			if m.showScanConfirm {
+			if m.showScanConfirm || m.showBaselineConfirm {
 				return m, nil
 			}
 			m.activeTab = (m.activeTab + 1) % 4
 			m.refreshActiveTabContent()
 
 		case "shift+tab":
-			if m.showScanConfirm {
+			if m.showScanConfirm || m.showBaselineConfirm {
 				return m, nil
 			}
 			m.activeTab = (m.activeTab + 3) % 4
 			m.refreshActiveTabContent()
 
 		case "1":
-			if m.showScanConfirm {
+			if m.showScanConfirm || m.showBaselineConfirm {
 				return m, nil
 			}
 			m.activeTab = 0
 			m.refreshActiveTabContent()
 		case "2":
-			if m.showScanConfirm {
+			if m.showScanConfirm || m.showBaselineConfirm {
 				return m, nil
 			}
 			m.activeTab = 1
 			m.refreshActiveTabContent()
 		case "3":
-			if m.showScanConfirm {
+			if m.showScanConfirm || m.showBaselineConfirm {
 				return m, nil
 			}
 			m.activeTab = 2
 			m.refreshActiveTabContent()
 		case "4":
-			if m.showScanConfirm {
+			if m.showScanConfirm || m.showBaselineConfirm {
 				return m, nil
 			}
 			m.activeTab = 3
 			m.refreshActiveTabContent()
 
 		case "d", " ":
-			if m.showScanConfirm {
+			if m.showScanConfirm || m.showBaselineConfirm {
 				return m, nil
 			}
 			// Trigger deep diagnostics
@@ -424,6 +475,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "s", "S":
+			if m.showScanConfirm || m.showBaselineConfirm {
+				return m, nil
+			}
 			// Prevent overlapping or duplicate active sweeps
 			if m.scanState == ScanStateStarting || m.scanState == ScanStateRunning || m.scanState == ScanStateCancelling || m.scanner.IsScanning() {
 				m.toastMsg = "Active sweep in progress or cancelling. Press [C] or [Esc] to cancel."
@@ -445,7 +499,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "r":
-			if m.showScanConfirm {
+			if m.showScanConfirm || m.showBaselineConfirm {
 				return m, nil
 			}
 			m.refreshHostDetails()
@@ -454,7 +508,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshAllTabContents()
 
 		case "e":
-			if m.showScanConfirm {
+			if m.showScanConfirm || m.showBaselineConfirm {
 				return m, nil
 			}
 			// Export incident report (Markdown + JSON)
@@ -483,6 +537,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.showBaselineConfirm {
+				if m.baselineConfirmVpReady {
+					m.baselineConfirmVp.GotoTop()
+				}
+				return m, nil
+			}
 			if m.viewportReady {
 				m.viewports[m.activeTab].GotoTop()
 			}
@@ -490,6 +550,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.showScanConfirm {
 				if m.confirmVpReady {
 					m.confirmViewport.GotoBottom()
+				}
+				return m, nil
+			}
+			if m.showBaselineConfirm {
+				if m.baselineConfirmVpReady {
+					m.baselineConfirmVp.GotoBottom()
 				}
 				return m, nil
 			}
@@ -503,6 +569,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.showBaselineConfirm {
+				if m.baselineConfirmVpReady {
+					m.baselineConfirmVp.LineUp(1)
+				}
+				return m, nil
+			}
 			if m.viewportReady {
 				m.viewports[m.activeTab].LineUp(1)
 			}
@@ -513,28 +585,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.showBaselineConfirm {
+				if m.baselineConfirmVpReady {
+					m.baselineConfirmVp.LineDown(1)
+				}
+				return m, nil
+			}
 			if m.viewportReady {
 				m.viewports[m.activeTab].LineDown(1)
 			}
-		case "pgup", "b", "B", "ctrl+b":
+		case "pgup", "b":
 			if m.showScanConfirm {
 				if m.confirmVpReady {
 					m.confirmViewport.ViewUp()
 				}
 				return m, nil
 			}
-			if msg.String() == "B" || msg.String() == "ctrl+b" || m.activeTab == 1 {
-				if m.poller != nil {
-					b, err := m.poller.RefreshBaseline(m.ifaceName)
-					if err == nil && b != nil {
-						m.toastMsg = fmt.Sprintf("Baseline refreshed for %s", m.ifaceName)
-						m.refreshAllTabContents()
-						return m, nil
-					} else if err != nil {
-						m.toastMsg = fmt.Sprintf("Baseline refresh failed: %v", err)
-						return m, nil
-					}
+			if m.showBaselineConfirm {
+				if m.baselineConfirmVpReady {
+					m.baselineConfirmVp.ViewUp()
 				}
+				return m, nil
 			}
 			if m.viewportReady {
 				m.viewports[m.activeTab].ViewUp()
@@ -546,9 +617,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.showBaselineConfirm {
+				if m.baselineConfirmVpReady {
+					m.baselineConfirmVp.ViewDown()
+				}
+				return m, nil
+			}
 			if m.viewportReady {
 				m.viewports[m.activeTab].ViewDown()
 			}
+		case "B", "ctrl+b":
+			if m.showScanConfirm || m.showBaselineConfirm {
+				return m, nil
+			}
+			if m.poller == nil {
+				m.toastMsg = "Telemetry monitoring not active"
+				return m, nil
+			}
+			pipe := m.poller.Status()
+			cfg := pipe.DHCPConfig
+			if cfg == nil {
+				m.toastMsg = "No active network configuration observed to establish baseline"
+				return m, nil
+			}
+			m.pendingBaselineCfg = cfg
+			m.pendingOldBaseline = pipe.Baseline
+			m.showBaselineConfirm = true
+			m.activeTab = 1 // Switch to Deep Diagnostics tab to display confirmation overlay
+			m.refreshActiveTabContent()
+			return m, nil
 		}
 
 	case tea.MouseMsg:
@@ -556,6 +653,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.confirmVpReady {
 				var cmd tea.Cmd
 				m.confirmViewport, cmd = m.confirmViewport.Update(msg)
+				if cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
+			return m, nil
+		}
+		if m.showBaselineConfirm {
+			if m.baselineConfirmVpReady {
+				var cmd tea.Cmd
+				m.baselineConfirmVp, cmd = m.baselineConfirmVp.Update(msg)
 				if cmd != nil {
 					cmds = append(cmds, cmd)
 				}
@@ -696,6 +803,8 @@ func (m *Model) View() string {
 	var content string
 	if m.showScanConfirm && m.pendingSweepPlan != nil {
 		content = renderScanConfirmationOverlay(m, viewWidth, availHeight)
+	} else if m.showBaselineConfirm && m.pendingBaselineCfg != nil {
+		content = renderBaselineConfirmationOverlay(m, viewWidth, availHeight)
 	} else {
 		content = m.viewports[m.activeTab].View()
 	}
@@ -718,7 +827,7 @@ func (m *Model) renderHeader(width int) string {
 	}
 
 	// For short terminal heights or when confirmation dialog is showing on tight screens (< 20 lines)
-	if m.height < 16 || (m.showScanConfirm && m.height < 20) {
+	if m.height < 16 || ((m.showScanConfirm || m.showBaselineConfirm) && m.height < 20) {
 		var line string
 		if width < 50 {
 			line = fmt.Sprintf("%s %s │ %s",
@@ -854,9 +963,13 @@ func (m *Model) renderTabs(width int) string {
 
 func (m *Model) renderFooter(width int) string {
 	// For short terminal heights or when confirmation dialog is showing on tight screens (< 20 lines)
-	if m.height < 16 || (m.showScanConfirm && m.height < 20) {
+	if m.height < 16 || ((m.showScanConfirm || m.showBaselineConfirm) && m.height < 20) {
 		if m.showScanConfirm {
 			line := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("[Enter/Y] Authorize  [Esc/N] Cancel")
+			return lipgloss.NewStyle().Width(width).Render(line)
+		}
+		if m.showBaselineConfirm {
+			line := lipgloss.NewStyle().Foreground(ColorAmber).Bold(true).Render("[Enter/Y] Confirm Refresh  [Esc/N] Cancel")
 			return lipgloss.NewStyle().Width(width).Render(line)
 		}
 
@@ -933,6 +1046,8 @@ func (m *Model) renderFooter(width int) string {
 	var keyHints string
 	if m.showScanConfirm {
 		keyHints = "[Enter / Y] Authorize & Scan │ [Esc / N] Cancel Sweep Authorization │ [Q] Quit"
+	} else if m.showBaselineConfirm {
+		keyHints = "[Enter / Y] Confirm Baseline Refresh │ [Esc / N] Cancel │ [Q] Quit"
 	} else if m.scanState == ScanStateStarting || m.scanState == ScanStateRunning || m.scanner.IsScanning() {
 		keyHints = "[C / Esc] Cancel Active Sweep │ [1-4/Tab] Views │ [E] Export │ [Q] Quit"
 	} else if m.scanState == ScanStateCancelling {

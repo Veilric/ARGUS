@@ -127,16 +127,156 @@ func dnsEqual(a, b []string) bool {
 	return true
 }
 
-// ChangeTracker deduplicates detected configuration changes so identical observations do not spam alerts.
-type ChangeTracker struct {
-	mu          sync.Mutex
-	lastAlerted map[string]string // Key: iface:fieldName, Value: last Alerted NewValue
+// ChangeTracker tracks configuration drift and restoration states per interface and field.
+type fieldState struct {
+	isDrifted  bool
+	driftValue string
 }
 
-// NewChangeTracker creates a deduplicating change tracker.
+type ChangeTracker struct {
+	mu          sync.Mutex
+	fieldStates map[string]*fieldState // Key: iface:fieldName
+	lastAlerted map[string]string      // Key: iface:fieldName, Value: last Alerted NewValue
+}
+
+// NewChangeTracker creates a stateful change tracker.
 func NewChangeTracker() *ChangeTracker {
 	return &ChangeTracker{
+		fieldStates: make(map[string]*fieldState),
 		lastAlerted: make(map[string]string),
+	}
+}
+
+// Track evaluates live configuration against baseline, detecting initial drift,
+// suppressing duplicate observations, emitting restoration events, and reliably
+// capturing recurring changes without being blinded by previous alerts.
+func (t *ChangeTracker) Track(baseline *ConfigBaseline, current *DHCPConfig) []ConfigChange {
+	if baseline == nil || current == nil {
+		return nil
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	var events []ConfigChange
+	now := current.ObservedAt
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	detected := DetectChanges(baseline, current)
+	driftedMap := make(map[string]ConfigChange)
+	for _, c := range detected {
+		driftedMap[c.FieldName] = c
+	}
+
+	iface := current.InterfaceName
+
+	fieldCheckers := []struct {
+		fieldName    string
+		hasValidLive bool
+		liveMatches  bool
+		baselineVal  string
+	}{
+		{
+			fieldName:    "Default Gateway",
+			hasValidLive: current.GatewayIP != "",
+			liveMatches:  baseline.GatewayIP != "" && current.GatewayIP == baseline.GatewayIP,
+			baselineVal:  baseline.GatewayIP,
+		},
+		{
+			fieldName:    "IPv4 Address",
+			hasValidLive: current.IPv4Address != "",
+			liveMatches:  baseline.IPv4Address != "" && current.IPv4Address == baseline.IPv4Address,
+			baselineVal:  baseline.IPv4Address,
+		},
+		{
+			fieldName:    "Subnet Prefix",
+			hasValidLive: current.IPv4Prefix > 0,
+			liveMatches:  baseline.IPv4Prefix > 0 && current.IPv4Prefix == baseline.IPv4Prefix,
+			baselineVal:  fmt.Sprintf("/%d", baseline.IPv4Prefix),
+		},
+		{
+			fieldName:    "DHCP Server",
+			hasValidLive: current.DHCPServerIP != "",
+			liveMatches:  baseline.DHCPServerIP != "" && current.DHCPServerIP == baseline.DHCPServerIP,
+			baselineVal:  baseline.DHCPServerIP,
+		},
+		{
+			fieldName:    "DNS Servers",
+			hasValidLive: len(current.DNSServers) > 0,
+			liveMatches:  len(baseline.DNSServers) > 0 && dnsEqual(baseline.DNSServers, current.DNSServers),
+			baselineVal:  fmt.Sprintf("[%s]", strings.Join(baseline.DNSServers, ", ")),
+		},
+		{
+			fieldName:    "Assignment Mode",
+			hasValidLive: current.Assignment != AssignmentUnknown && current.Assignment != "",
+			liveMatches:  baseline.Assignment != AssignmentUnknown && current.Assignment == baseline.Assignment,
+			baselineVal:  string(baseline.Assignment),
+		},
+	}
+
+	for _, fc := range fieldCheckers {
+		key := fmt.Sprintf("%s:%s", iface, fc.fieldName)
+		state, exists := t.fieldStates[key]
+		if !exists {
+			state = &fieldState{}
+			t.fieldStates[key] = state
+		}
+
+		if chg, isDrifted := driftedMap[fc.fieldName]; isDrifted {
+			// Field is currently drifted from baseline
+			if !state.isDrifted || state.driftValue != chg.NewValue {
+				state.isDrifted = true
+				state.driftValue = chg.NewValue
+				t.lastAlerted[key] = chg.NewValue
+				events = append(events, chg)
+			}
+			// If state.isDrifted && state.driftValue == chg.NewValue: duplicate suppressed
+		} else {
+			// Field is not currently drifted according to DetectChanges
+			if state.isDrifted {
+				// Field was previously drifted. Only declare restoration if the current observation
+				// has genuine valid live data and matches baseline. Do not invent restoration on missing data.
+				if fc.hasValidLive && fc.liveMatches {
+					oldVal := state.driftValue
+					state.isDrifted = false
+					state.driftValue = ""
+					delete(t.lastAlerted, key)
+
+					events = append(events, ConfigChange{
+						Kind:          ChangeRestored,
+						InterfaceName: iface,
+						FieldName:     fc.fieldName,
+						OldValue:      oldVal,
+						NewValue:      fc.baselineVal,
+						Timestamp:     now,
+						Summary:       fmt.Sprintf("%s restored to baseline value (%s)", fc.fieldName, fc.baselineVal),
+						Implication:   "Observed configuration returned to the established baseline reference.",
+					})
+				}
+			}
+		}
+	}
+
+	return events
+}
+
+// Reset clears tracked drift state for an interface (e.g. after baseline is refreshed or confirmed).
+func (t *ChangeTracker) Reset(ifaceName string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	prefix := ifaceName + ":"
+	for k := range t.fieldStates {
+		if strings.HasPrefix(k, prefix) {
+			delete(t.fieldStates, k)
+		}
+	}
+	for k := range t.lastAlerted {
+		if strings.HasPrefix(k, prefix) {
+			delete(t.lastAlerted, k)
+		}
 	}
 }
 

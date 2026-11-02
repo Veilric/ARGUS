@@ -31,7 +31,11 @@ func ParseDHClientLease(content string, ifaceName string) (*DHCPConfig, error) {
 
 		if line == "}" && current != nil {
 			if ifaceName == "" || current.InterfaceName == ifaceName {
-				latest = current
+				// Reject expired leases
+				isExpired := current.LeaseExpires != nil && current.LeaseExpires.Before(time.Now())
+				if !isExpired {
+					latest = current
+				}
 			}
 			current = nil
 			continue
@@ -106,6 +110,13 @@ func ParseDHClientLease(content string, ifaceName string) (*DHCPConfig, error) {
 
 // ParseSystemdNetworkdLease parses systemd-networkd /run/systemd/netif/leases/* key-value files.
 func ParseSystemdNetworkdLease(content string, ifaceName string) (*DHCPConfig, error) {
+	return ParseSystemdNetworkdLeaseWithAcquisition(content, ifaceName, time.Time{})
+}
+
+// ParseSystemdNetworkdLeaseWithAcquisition parses a systemd-networkd lease, anchoring the lease lifetime
+// to a trustworthy acquisition timestamp (such as file modification time or internal acquisition header)
+// rather than advancing expiration on every parse.
+func ParseSystemdNetworkdLeaseWithAcquisition(content string, ifaceName string, acquiredAt time.Time) (*DHCPConfig, error) {
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	cfg := &DHCPConfig{
 		InterfaceName: ifaceName,
@@ -113,6 +124,9 @@ func ParseSystemdNetworkdLease(content string, ifaceName string) (*DHCPConfig, e
 		Source:        "systemd-networkd",
 		ObservedAt:    time.Now(),
 	}
+
+	var lifetimeSec int64
+	var fileAcquired time.Time
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -155,8 +169,15 @@ func ParseSystemdNetworkdLease(content string, ifaceName string) (*DHCPConfig, e
 			cfg.DomainName = val
 		case "LIFETIME":
 			if sec, err := strconv.ParseInt(val, 10, 64); err == nil && sec > 0 {
-				exp := time.Now().Add(time.Duration(sec) * time.Second)
-				cfg.LeaseExpires = &exp
+				lifetimeSec = sec
+			}
+		case "_ACQUIRED", "USEC_ACQUIRED", "TIMESTAMP_REALTIME":
+			if usec, err := strconv.ParseInt(val, 10, 64); err == nil && usec > 0 {
+				if usec > 1_000_000_000_000_000 {
+					fileAcquired = time.Unix(usec/1_000_000, (usec%1_000_000)*1000)
+				} else if usec > 1_000_000_000 {
+					fileAcquired = time.Unix(usec, 0)
+				}
 			}
 		}
 	}
@@ -164,5 +185,32 @@ func ParseSystemdNetworkdLease(content string, ifaceName string) (*DHCPConfig, e
 	if cfg.IPv4Address == "" {
 		return nil, nil
 	}
+
+	// Determine trustworthy acquisition timestamp
+	var tAcq time.Time
+	if !fileAcquired.IsZero() {
+		tAcq = fileAcquired
+	} else if !acquiredAt.IsZero() {
+		tAcq = acquiredAt
+	}
+
+	if lifetimeSec > 0 {
+		if !tAcq.IsZero() {
+			cfg.LeaseObtained = &tAcq
+			exp := tAcq.Add(time.Duration(lifetimeSec) * time.Second)
+			cfg.LeaseExpires = &exp
+
+			// Reject if already expired
+			if exp.Before(time.Now()) {
+				return nil, nil
+			}
+		} else {
+			// Lease age cannot be determined reliably from file alone without acquisition evidence.
+			// Explicitly qualify its validity and do NOT advance expiration relative to current time.
+			cfg.LeaseExpires = nil
+			cfg.Source = "systemd-networkd (unverified lease age)"
+		}
+	}
+
 	return cfg, nil
 }

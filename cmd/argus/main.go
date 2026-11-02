@@ -98,7 +98,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error inspecting interface %q: %v\n", iface.Name, err)
 			os.Exit(1)
 		}
-		b, err := baselineStore.Establish(cfgObserved)
+		b, err := baselineStore.EstablishConfirmed(cfgObserved)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error saving baseline: %v\n", err)
 			os.Exit(1)
