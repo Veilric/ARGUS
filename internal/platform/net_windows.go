@@ -8,23 +8,37 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
-	"regexp"
+	"strconv"
 	"strings"
 )
 
 // WindowsAdapter implements NetworkAdapter on Windows platforms.
-type WindowsAdapter struct{}
+type WindowsAdapter struct {
+	configuredIface string
+}
 
-func NewAdapter() NetworkAdapter {
-	return &WindowsAdapter{}
+func NewAdapter(ifaceName ...string) NetworkAdapter {
+	name := ""
+	if len(ifaceName) > 0 {
+		name = ifaceName[0]
+	}
+	return &WindowsAdapter{configuredIface: name}
 }
 
 func (a *WindowsAdapter) IsElevated() bool {
 	return IsElevated()
 }
 
-// GetDefaultInterface returns the primary active network adapter.
+// GetDefaultInterface returns the primary active network adapter, or the explicitly configured interface.
 func (a *WindowsAdapter) GetDefaultInterface() (*InterfaceInfo, error) {
+	if a.configuredIface != "" {
+		iface, err := net.InterfaceByName(a.configuredIface)
+		if err != nil {
+			return nil, fmt.Errorf("requested interface %q cannot be found: %w", a.configuredIface, err)
+		}
+		return toInterfaceInfo(iface), nil
+	}
+
 	gwIP, err := a.GetDefaultGateway()
 	ifaces, netErr := net.Interfaces()
 	if netErr != nil {
@@ -75,6 +89,20 @@ func (a *WindowsAdapter) GetDefaultGateway() (net.IP, error) {
 		return nil, fmt.Errorf("failed to execute route print: %w", err)
 	}
 
+	var allowedIPs map[string]bool
+	if a.configuredIface != "" {
+		allowedIPs = make(map[string]bool)
+		if iface, err := net.InterfaceByName(a.configuredIface); err == nil {
+			if addrs, err := iface.Addrs(); err == nil {
+				for _, addr := range addrs {
+					if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil {
+						allowedIPs[ipNet.IP.String()] = true
+					}
+				}
+			}
+		}
+	}
+
 	scanner := bufio.NewScanner(&out)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -82,37 +110,177 @@ func (a *WindowsAdapter) GetDefaultGateway() (net.IP, error) {
 		// Active Routes: Network Destination, Netmask, Gateway, Interface, Metric
 		if len(fields) >= 5 && fields[0] == "0.0.0.0" && fields[1] == "0.0.0.0" {
 			gw := net.ParseIP(fields[2])
+			ifaceIP := fields[3]
 			if gw != nil && gw.To4() != nil {
+				if a.configuredIface != "" {
+					if allowedIPs[ifaceIP] {
+						return gw, nil
+					}
+					// Route belongs to a different interface; do not silently use it
+					continue
+				}
 				return gw, nil
 			}
 		}
 	}
+	if a.configuredIface != "" {
+		return nil, fmt.Errorf("no default gateway route found for interface %q", a.configuredIface)
+	}
 	return nil, fmt.Errorf("default gateway not found in route table")
 }
 
-// GetDNSServers parses DNS servers via 'ipconfig /all'.
-func (a *WindowsAdapter) GetDNSServers() ([]string, error) {
-	cmd := exec.Command("ipconfig", "/all")
+// GetRouteStatus inspects default routes, their interface attribution, and metrics on Windows.
+func (a *WindowsAdapter) GetRouteStatus() (RouteStatus, error) {
+	cmd := exec.Command("route", "print", "0.0.0.0")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
-		return []string{"1.1.1.1", "8.8.8.8"}, nil
+		return RouteStatus{
+			HasDefaultRoute: false,
+			IsPrimary:       false,
+			Details:         fmt.Sprintf("Failed to query route table: %v", err),
+		}, nil
 	}
 
-	var servers []string
-	dnsRegex := regexp.MustCompile(`(?i)DNS Servers[ .:]+:\s*([0-9.]+)`)
-	scanner := bufio.NewScanner(&out)
-	for scanner.Scan() {
-		matches := dnsRegex.FindStringSubmatch(scanner.Text())
-		if len(matches) > 1 {
-			servers = append(servers, matches[1])
+	var allowedIPs map[string]bool
+	if a.configuredIface != "" {
+		allowedIPs = make(map[string]bool)
+		if iface, err := net.InterfaceByName(a.configuredIface); err == nil {
+			if addrs, err := iface.Addrs(); err == nil {
+				for _, addr := range addrs {
+					if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil {
+						allowedIPs[ipNet.IP.String()] = true
+					}
+				}
+			}
 		}
 	}
 
-	if len(servers) == 0 {
-		return []string{"1.1.1.1", "8.8.8.8"}, nil
+	type winRoute struct {
+		gwIP    net.IP
+		ifaceIP string
+		metric  int
 	}
-	return servers, nil
+
+	var defaultRoutes []winRoute
+	lowestMetric := 999999
+
+	scanner := bufio.NewScanner(&out)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		fields := strings.Fields(line)
+		if len(fields) >= 5 && fields[0] == "0.0.0.0" && fields[1] == "0.0.0.0" {
+			gw := net.ParseIP(fields[2])
+			ifaceIP := fields[3]
+			metric, _ := strconv.Atoi(fields[4])
+			if gw != nil && gw.To4() != nil {
+				defaultRoutes = append(defaultRoutes, winRoute{
+					gwIP:    gw,
+					ifaceIP: ifaceIP,
+					metric:  metric,
+				})
+				if metric < lowestMetric {
+					lowestMetric = metric
+				}
+			}
+		}
+	}
+
+	if len(defaultRoutes) == 0 {
+		return RouteStatus{
+			HasDefaultRoute: false,
+			IsPrimary:       false,
+			Details:         "No default route found in Windows routing table",
+		}, nil
+	}
+
+	if a.configuredIface != "" {
+		for _, r := range defaultRoutes {
+			if allowedIPs[r.ifaceIP] {
+				isPrimary := (r.metric == lowestMetric)
+				details := fmt.Sprintf("Selected interface %s is primary default route (metric %d)", a.configuredIface, r.metric)
+				if !isPrimary {
+					details = fmt.Sprintf("Selected interface %s has default route (metric %d), but primary route has lower metric (%d)", a.configuredIface, r.metric, lowestMetric)
+				}
+				return RouteStatus{
+					HasDefaultRoute: true,
+					IsPrimary:       isPrimary,
+					GatewayIP:       r.gwIP,
+					InterfaceName:   a.configuredIface,
+					Metric:          r.metric,
+					Details:         details,
+				}, nil
+			}
+		}
+		return RouteStatus{
+			HasDefaultRoute: false,
+			IsPrimary:       false,
+			InterfaceName:   a.configuredIface,
+			Details:         fmt.Sprintf("No default gateway route configured on selected interface %s", a.configuredIface),
+		}, nil
+	}
+
+	return RouteStatus{
+		HasDefaultRoute: true,
+		IsPrimary:       true,
+		GatewayIP:       defaultRoutes[0].gwIP,
+		InterfaceName:   defaultRoutes[0].ifaceIP,
+		Metric:          defaultRoutes[0].metric,
+		Details:         "System-wide default route",
+	}, nil
+}
+
+// GetDNSServers parses DNS servers via 'ipconfig /all' and 'netsh' without inventing fallback servers.
+func (a *WindowsAdapter) GetDNSServers() ([]string, error) {
+	var targetIPs []string
+	if a.configuredIface != "" {
+		if iface, err := net.InterfaceByName(a.configuredIface); err == nil {
+			if addrs, err := iface.Addrs(); err == nil {
+				for _, addr := range addrs {
+					if ipNet, ok := addr.(*net.IPNet); ok {
+						targetIPs = append(targetIPs, ipNet.IP.String())
+					}
+				}
+			}
+		}
+	}
+
+	// 1. Primary discovery: ipconfig /all
+	cmd := exec.Command("ipconfig", "/all")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	var ipconfigErr error
+	if err := cmd.Run(); err == nil {
+		servers, pErr := ParseWindowsIPConfigDNS(out.String(), a.configuredIface, targetIPs)
+		if pErr == nil && len(servers) > 0 {
+			return servers, nil
+		}
+		ipconfigErr = pErr
+	} else {
+		ipconfigErr = err
+	}
+
+	// 2. Secondary discovery: netsh interface ip/ipv6 show dnsservers
+	var v4Out, v6Out bytes.Buffer
+	cmdV4 := exec.Command("netsh", "interface", "ip", "show", "dnsservers")
+	cmdV4.Stdout = &v4Out
+	_ = cmdV4.Run()
+
+	cmdV6 := exec.Command("netsh", "interface", "ipv6", "show", "dnsservers")
+	cmdV6.Stdout = &v6Out
+	_ = cmdV6.Run()
+
+	if v4Out.Len() > 0 || v6Out.Len() > 0 {
+		servers, netshErr := ParseWindowsNetshDNS(v4Out.String(), v6Out.String(), a.configuredIface)
+		if netshErr == nil && len(servers) > 0 {
+			return servers, nil
+		}
+	}
+
+	if ipconfigErr != nil {
+		return nil, fmt.Errorf("failed to discover Windows DNS configuration: %w", ipconfigErr)
+	}
+	return nil, fmt.Errorf("no DNS servers configured on interface %q", a.configuredIface)
 }
 
 // GetARPTable parses entries from 'arp -a'.
@@ -124,9 +292,24 @@ func (a *WindowsAdapter) GetARPTable() ([]NeighborEntry, error) {
 		return nil, fmt.Errorf("failed to run arp -a: %w", err)
 	}
 
+	var allowedIPs map[string]bool
+	if a.configuredIface != "" {
+		allowedIPs = make(map[string]bool)
+		if iface, err := net.InterfaceByName(a.configuredIface); err == nil {
+			if addrs, err := iface.Addrs(); err == nil {
+				for _, addr := range addrs {
+					if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil {
+						allowedIPs[ipNet.IP.String()] = true
+					}
+				}
+			}
+		}
+	}
+
 	var neighbors []NeighborEntry
 	scanner := bufio.NewScanner(&out)
 	currentInterface := ""
+	currentMatchesConfig := true
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -134,7 +317,14 @@ func (a *WindowsAdapter) GetARPTable() ([]NeighborEntry, error) {
 			parts := strings.Fields(line)
 			if len(parts) >= 2 {
 				currentInterface = parts[1]
+				if a.configuredIface != "" {
+					currentMatchesConfig = allowedIPs[currentInterface]
+				}
 			}
+			continue
+		}
+
+		if a.configuredIface != "" && !currentMatchesConfig {
 			continue
 		}
 

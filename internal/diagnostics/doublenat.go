@@ -50,10 +50,13 @@ func (c *DoubleNATCheck) Run(ctx context.Context, netCtx *NetworkContext) (*Diag
 		return &DiagnosticResult{
 			ID:        c.ID(),
 			Title:     c.Name(),
-			Category:  CategoryHealthy,
-			Severity:  SeverityNone,
-			Summary:   "Direct Public Egress / Bridge Mode (Gateway is a public IP, No NAT)",
-			Evidence:  []string{fmt.Sprintf("Hop 1 Gateway (%s) is a publicly routable IP", gwIP.String())},
+			Category:  CategoryInconclusive,
+			Severity:  SeverityInfo,
+			Summary:   fmt.Sprintf("Default gateway (%s) is a public IP. Local private NAT hop not present, but upstream carrier/transparent NAT cannot be ruled out.", gwIP.String()),
+			Evidence: []string{
+				fmt.Sprintf("Hop 1 Gateway (%s) is a publicly routable IP", gwIP.String()),
+				"A public first-hop gateway indicates no local RFC 1918 NAT router, but does not independently prove the complete absence of upstream network address translation.",
+			},
 			Timestamp: time.Now(),
 		}, nil
 	}
@@ -71,11 +74,11 @@ func (c *DoubleNATCheck) Run(ctx context.Context, netCtx *NetworkContext) (*Diag
 			return &DiagnosticResult{
 				ID:       c.ID(),
 				Title:    c.Name(),
-				Category: CategoryConfirmed,
+				Category: CategorySuspected,
 				Severity: SeverityWarning,
-				Summary:  fmt.Sprintf("DOUBLE NAT DETECTED: Cascaded private routers at Hop 1 (%s) and Hop 2 (%s)", gwIP.String(), hop2IP.String()),
-				Evidence: evidence,
-				Remediation: "Put upstream modem/router into Bridge Mode or configure DMZ / IP Passthrough to prevent port forwarding and VoIP/gaming issues.",
+				Summary:  fmt.Sprintf("Multiple private routing hops observed (Hop 1: %s, Hop 2: %s). Potential Double NAT suspected.", gwIP.String(), hop2IP.String()),
+				Evidence: append(evidence, "Note: internal enterprise transit routing without NAT can also produce multiple private hops; double NAT is suspected, not conclusively proven without port mapping verification"),
+				Remediation: "Inspect upstream modem/router configuration to verify whether two cascaded NAT layers exist, or configure Bridge / IP Passthrough mode.",
 				Timestamp: time.Now(),
 			}, nil
 		}
@@ -86,7 +89,7 @@ func (c *DoubleNATCheck) Run(ctx context.Context, netCtx *NetworkContext) (*Diag
 			Title:     c.Name(),
 			Category:  CategoryHealthy,
 			Severity:  SeverityNone,
-			Summary:   fmt.Sprintf("Clean Single NAT: Hop 1 (%s) is private, Hop 2 (%s) is public WAN", gwIP.String(), hop2IP.String()),
+			Summary:   fmt.Sprintf("Clean Single Private Hop: Hop 1 (%s) is private, Hop 2 (%s) is public WAN", gwIP.String(), hop2IP.String()),
 			Evidence:  evidence,
 			Timestamp: time.Now(),
 		}, nil

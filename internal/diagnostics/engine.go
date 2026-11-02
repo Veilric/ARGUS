@@ -5,18 +5,23 @@ import (
 	"sync"
 	"time"
 
+	"argus/internal/dhcp"
 	"argus/internal/platform"
 )
 
 // Engine orchestrates independent diagnostic modules.
 type Engine struct {
-	modules []DiagnosticModule
-	adapter platform.NetworkAdapter
+	modules       []DiagnosticModule
+	adapter       platform.NetworkAdapter
+	baselineStore *dhcp.BaselineStore
+	inspector     dhcp.Inspector
 }
 
-func NewEngine(adapter platform.NetworkAdapter) *Engine {
+func NewEngine(adapter platform.NetworkAdapter, store *dhcp.BaselineStore, inspector dhcp.Inspector) *Engine {
 	e := &Engine{
-		adapter: adapter,
+		adapter:       adapter,
+		baselineStore: store,
+		inspector:     inspector,
 	}
 	// Register default modular checks
 	e.Register(&LinkCarrierCheck{})
@@ -27,6 +32,7 @@ func NewEngine(adapter platform.NetworkAdapter) *Engine {
 	e.Register(&DNSvsWANCheck{})
 	e.Register(&CaptivePortalCheck{})
 	e.Register(&MTUPathCheck{})
+	e.Register(NewDHCPIntelligenceCheck(store, inspector))
 	return e
 }
 
@@ -108,6 +114,43 @@ func (e *Engine) gatherContext() *NetworkContext {
 			ctx.ARPTable[n.IP] = n.MAC
 			if ctx.GatewayIP != "" && n.IP == ctx.GatewayIP {
 				ctx.GatewayMAC = n.MAC
+			}
+		}
+	}
+
+	routeStatus, err := e.adapter.GetRouteStatus()
+	if err == nil {
+		if iface != nil && routeStatus.HasDefaultRoute && routeStatus.IsPrimary {
+			ctx.Attribution = string(platform.AttributionSelectedInterface)
+			ctx.AttributionDetails = routeStatus.Details
+		} else if iface != nil && routeStatus.HasDefaultRoute && !routeStatus.IsPrimary {
+			ctx.Attribution = string(platform.AttributionUnverified)
+			ctx.AttributionDetails = routeStatus.Details
+		} else if iface != nil && !routeStatus.HasDefaultRoute {
+			ctx.Attribution = string(platform.AttributionUnverified)
+			ctx.AttributionDetails = routeStatus.Details
+		} else {
+			ctx.Attribution = string(platform.AttributionSystemWide)
+			ctx.AttributionDetails = routeStatus.Details
+		}
+	} else {
+		ctx.Attribution = string(platform.AttributionSystemWide)
+		ctx.AttributionDetails = "System-wide default routing"
+	}
+
+	// Gather DHCP and baseline configuration
+	if iface != nil && iface.Name != "" {
+		if e.inspector != nil {
+			if cfg, dErr := e.inspector.Inspect(iface.Name); dErr == nil && cfg != nil {
+				ctx.DHCPConfig = cfg
+			}
+		}
+		if e.baselineStore != nil {
+			if b, ok := e.baselineStore.Get(iface.Name); ok && b != nil {
+				ctx.Baseline = b
+				if ctx.DHCPConfig != nil {
+					ctx.DetectedChanges = dhcp.DetectChanges(b, ctx.DHCPConfig)
+				}
 			}
 		}
 	}

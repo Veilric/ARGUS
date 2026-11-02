@@ -3,6 +3,8 @@ package diagnostics
 import (
 	"context"
 	"time"
+
+	"argus/internal/dhcp"
 )
 
 // ResultCategory defines the diagnostic confidence level.
@@ -54,8 +56,13 @@ type NetworkContext struct {
 	PublicIP        string
 	PublicReachable bool
 	PublicRTT       time.Duration
-	IsElevated      bool
-	ARPTable        map[string]string // IP -> MAC
+	IsElevated         bool
+	ARPTable           map[string]string // IP -> MAC
+	Attribution        string
+	AttributionDetails string
+	DHCPConfig         *dhcp.DHCPConfig
+	Baseline           *dhcp.ConfigBaseline
+	DetectedChanges    []dhcp.ConfigChange
 }
 
 // DiagnosticModule represents an independent check.

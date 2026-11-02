@@ -57,6 +57,10 @@ func renderPipeline(m *Model, width int) string {
 		nodeGW := NodeOffline.Render("[GATEWAY ✗]")
 		if pipe.GatewayOK {
 			nodeGW = NodeOnline.Render(fmt.Sprintf("[GATEWAY ✔ %s]", gwTime))
+		} else if pipe.GatewayState == "INCONCLUSIVE" {
+			nodeGW = NodeWarning.Render("[GATEWAY ? Inconclusive]")
+		} else if pipe.GatewayState == "UNAVAILABLE" {
+			nodeGW = lipgloss.NewStyle().Foreground(ColorMuted).Render("[GATEWAY — Unavailable]")
 		}
 
 		arrow2 := ArrowStyle.Render("──")
@@ -77,6 +81,10 @@ func renderPipeline(m *Model, width int) string {
 		nodeGW := NodeOffline.Render("[GW: ✗]")
 		if pipe.GatewayOK {
 			nodeGW = NodeOnline.Render(fmt.Sprintf("[GW: %s]", gwTime))
+		} else if pipe.GatewayState == "INCONCLUSIVE" {
+			nodeGW = NodeWarning.Render("[GW: Inconclusive]")
+		} else if pipe.GatewayState == "UNAVAILABLE" {
+			nodeGW = lipgloss.NewStyle().Foreground(ColorMuted).Render("[GW: —]")
 		}
 		nodeDNS := NodeOffline.Render("[DNS: ✗]")
 		if pipe.DNSOK {
@@ -98,6 +106,10 @@ func renderPipeline(m *Model, width int) string {
 		nodeGW := NodeOffline.Render("[GW ✗]")
 		if pipe.GatewayOK {
 			nodeGW = NodeOnline.Render(fmt.Sprintf("[GW ✔ %s]", gwTime))
+		} else if pipe.GatewayState == "INCONCLUSIVE" {
+			nodeGW = NodeWarning.Render("[GW ?]")
+		} else if pipe.GatewayState == "UNAVAILABLE" {
+			nodeGW = lipgloss.NewStyle().Foreground(ColorMuted).Render("[GW —]")
 		}
 		nodeDNS := NodeOffline.Render("[DNS ✗]")
 		if pipe.DNSOK {
@@ -120,11 +132,17 @@ func renderPipeline(m *Model, width int) string {
 	if !pipe.LinkOK {
 		summary = NodeOffline.Render("PHYSICAL LINK DOWN / DISCONNECTED")
 	} else if !pipe.GatewayOK {
-		summary = NodeOffline.Render("GATEWAY UNREACHABLE — Internal LAN / Switch failure")
+		if pipe.GatewayState == "INCONCLUSIVE" {
+			summary = NodeWarning.Render("GATEWAY INCONCLUSIVE — Target silent to TCP/ICMP probes, visible in ARP cache")
+		} else if pipe.GatewayState == "UNAVAILABLE" {
+			summary = lipgloss.NewStyle().Foreground(ColorMuted).Render("GATEWAY UNAVAILABLE — No default gateway route found for active interface")
+		} else {
+			summary = NodeOffline.Render("GATEWAY UNREACHABLE — Probes failed; Internal LAN / Switch failure")
+		}
 	} else if !pipe.InternetOK && !pipe.DNSOK {
-		summary = NodeOffline.Render("UPSTREAM ISP OUTAGE — WAN connection dropped beyond gateway")
+		summary = NodeOffline.Render("EXTERNAL OUTAGE / UNREACHABLE — Probes failing beyond gateway (Suspected WAN or upstream drop)")
 	} else if !pipe.DNSOK && pipe.InternetOK {
-		summary = NodeWarning.Render("DNS SERVER FAILURE — Internet alive, name resolution broken")
+		summary = NodeWarning.Render("DNS RESOLUTION FAILURE — Internet alive, name resolution failing")
 	} else {
 		summary = NodeOnline.Render("All reachability checkpoints nominal")
 	}
@@ -141,22 +159,24 @@ func renderPipeline(m *Model, width int) string {
 func renderVitals(m *Model, width int) string {
 	pipe := m.poller.Status()
 
-	natStr := lipgloss.NewStyle().Foreground(ColorEmerald).Render("Single NAT [Clean]")
+	natStr := lipgloss.NewStyle().Foreground(ColorMuted).Render("Unverified (Press [D])")
 	if m.latestDoubleNAT != "" {
 		natStr = m.latestDoubleNAT
 	}
 
-	conflictStr := lipgloss.NewStyle().Foreground(ColorEmerald).Render("Clean (0 detected)")
+	conflictStr := lipgloss.NewStyle().Foreground(ColorMuted).Render("Passive (0 ARP duplicates)")
 	if m.latestConflict != "" {
 		conflictStr = m.latestConflict
 	}
 
-	captiveStr := lipgloss.NewStyle().Foreground(ColorEmerald).Render("Direct Egress Verified")
+	captiveStr := lipgloss.NewStyle().Foreground(ColorMuted).Render("Probing / Unverified")
 	if pipe.CaptiveState == "DETECTED" {
 		captiveStr = lipgloss.NewStyle().Foreground(ColorCoral).Bold(true).Render("CAPTIVE PORTAL DETECTED")
+	} else if pipe.CaptiveState == "CLEAN" {
+		captiveStr = lipgloss.NewStyle().Foreground(ColorEmerald).Render("Direct Egress Verified")
 	}
 
-	mtuStr := lipgloss.NewStyle().Foreground(ColorEmerald).Render("1500 bytes (Clean)")
+	mtuStr := lipgloss.NewStyle().Foreground(ColorMuted).Render("Unverified (Press [D])")
 	if m.latestMTU != "" {
 		mtuStr = m.latestMTU
 	}

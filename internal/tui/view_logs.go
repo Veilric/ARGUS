@@ -45,8 +45,10 @@ func renderLogsView(m *Model, width int) string {
 		var styled string
 		if strings.Contains(l, "FAIL") || strings.Contains(l, "UNREACHABLE") || strings.Contains(l, "CRITICAL") {
 			styled = lipgloss.NewStyle().Foreground(ColorCoral).Bold(true).Render(l)
-		} else if strings.Contains(l, "WARN") || strings.Contains(l, "DRIFT") {
+		} else if strings.Contains(l, "WARN") || strings.Contains(l, "DRIFT") || strings.Contains(l, "[CONFIG]") {
 			styled = lipgloss.NewStyle().Foreground(ColorAmber).Render(l)
+		} else if strings.Contains(l, "[BASELINE]") {
+			styled = lipgloss.NewStyle().Foreground(ColorCyan).Render(l)
 		} else if strings.Contains(l, "OK") || strings.Contains(l, "CLEAN") || strings.Contains(l, "HEALTHY") {
 			styled = lipgloss.NewStyle().Foreground(ColorEmerald).Render(l)
 		} else {

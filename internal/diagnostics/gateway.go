@@ -3,9 +3,10 @@ package diagnostics
 import (
 	"context"
 	"fmt"
-	"net"
 	"sync"
 	"time"
+
+	"argus/internal/platform"
 )
 
 var (
@@ -18,7 +19,7 @@ type GatewayHealthCheck struct{}
 
 func (c *GatewayHealthCheck) ID() string          { return "gateway_health" }
 func (c *GatewayHealthCheck) Name() string        { return "Default Gateway Reachability" }
-func (c *GatewayHealthCheck) Description() string { return "Verifies local default router response and RTT" }
+func (c *GatewayHealthCheck) Description() string { return "Verifies local default router response, verified probe method, and RTT" }
 
 func (c *GatewayHealthCheck) Run(ctx context.Context, netCtx *NetworkContext) (*DiagnosticResult, error) {
 	if netCtx.GatewayIP == "" {
@@ -34,59 +35,51 @@ func (c *GatewayHealthCheck) Run(ctx context.Context, netCtx *NetworkContext) (*
 		}, nil
 	}
 
-	start := time.Now()
-	reachable := false
-	ports := []string{"53", "80", "443"}
-	var finalRTT time.Duration
-
-	for _, port := range ports {
-		conn, err := net.DialTimeout("tcp", net.JoinHostPort(netCtx.GatewayIP, port), 600*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			reachable = true
-			finalRTT = time.Since(start)
-			break
-		}
-	}
-
-	// UDP probe fallback
-	if !reachable {
-		conn, err := net.DialTimeout("udp", net.JoinHostPort(netCtx.GatewayIP, "12345"), 500*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			reachable = true
-			finalRTT = time.Since(start)
-		}
-	}
+	probe := platform.ProbeGatewayReachability(ctx, netCtx.GatewayIP, netCtx.GatewayMAC, 1500*time.Millisecond)
 
 	evidence := []string{
 		fmt.Sprintf("Default Gateway IP: %s", netCtx.GatewayIP),
 		fmt.Sprintf("Gateway MAC: %s", netCtx.GatewayMAC),
+		fmt.Sprintf("Verification Method: %s", probe.Method),
+		fmt.Sprintf("Probe Details: %s", probe.Details),
 	}
 
-	if !reachable {
-		evidence = append(evidence, "TCP/UDP probes to gateway timed out")
+	if probe.State == platform.ReachabilityConfirmed {
+		evidence = append(evidence, fmt.Sprintf("Response Latency: %s", probe.RTT.Round(time.Microsecond)))
+		return &DiagnosticResult{
+			ID:        c.ID(),
+			Title:     c.Name(),
+			Category:  CategoryHealthy,
+			Severity:  SeverityNone,
+			Summary:   fmt.Sprintf("Default Gateway (%s) is reachable via %s (%s)", netCtx.GatewayIP, probe.Method, probe.RTT.Round(time.Microsecond)),
+			Evidence:  evidence,
+			Timestamp: time.Now(),
+		}, nil
+	}
+
+	if probe.State == platform.ReachabilityInconclusive {
 		return &DiagnosticResult{
 			ID:          c.ID(),
 			Title:       c.Name(),
-			Category:    CategoryConfirmed,
-			Severity:    SeverityCritical,
-			Summary:     fmt.Sprintf("Default Gateway (%s) is UNREACHABLE", netCtx.GatewayIP),
+			Category:    CategoryInconclusive,
+			Severity:    SeverityWarning,
+			Summary:     fmt.Sprintf("Default Gateway (%s) reachability inconclusive (drops active probes, present in ARP)", netCtx.GatewayIP),
 			Evidence:    evidence,
-			Remediation: "Inspect physical connection to local switch/router, Wi-Fi association, or router power.",
+			Remediation: "Router firewall may be dropping ICMP echo and unsolicited TCP packets. Check router administrative interface or client communication.",
 			Timestamp:   time.Now(),
 		}, nil
 	}
 
-	evidence = append(evidence, fmt.Sprintf("Response Latency: %s", finalRTT.Round(time.Microsecond)))
+	// ReachabilityUnreachable
 	return &DiagnosticResult{
-		ID:        c.ID(),
-		Title:     c.Name(),
-		Category:  CategoryHealthy,
-		Severity:  SeverityNone,
-		Summary:   fmt.Sprintf("Default Gateway (%s) is healthy and responsive (%s)", netCtx.GatewayIP, finalRTT.Round(time.Microsecond)),
-		Evidence:  evidence,
-		Timestamp: time.Now(),
+		ID:          c.ID(),
+		Title:       c.Name(),
+		Category:    CategoryConfirmed,
+		Severity:    SeverityCritical,
+		Summary:     fmt.Sprintf("Default Gateway (%s) is UNREACHABLE", netCtx.GatewayIP),
+		Evidence:    evidence,
+		Remediation: "Inspect physical connection to local switch/router, Wi-Fi association, or router power.",
+		Timestamp:   time.Now(),
 	}, nil
 }
 

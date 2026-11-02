@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"argus/internal/dhcp"
 	"argus/internal/diagnostics"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -18,12 +19,20 @@ func renderDiagnosticsView(m *Model, width int) string {
 	if cardWidth < 10 {
 		cardWidth = 10
 	}
+	textWidth := cardWidth - 4
+	if textWidth < 10 {
+		textWidth = 10
+	}
 
 	headerText := lipgloss.NewStyle().Bold(true).Foreground(ColorCyan).Render("MODULAR DIAGNOSTIC FAULT ISOLATION")
-	subText := lipgloss.NewStyle().Foreground(ColorMuted).Width(cardWidth - 4).Render("Press [D] to re-run all diagnostic modules | Evidence-backed root cause engine")
+	subText := lipgloss.NewStyle().Foreground(ColorMuted).Width(textWidth).Render("Press [D] to re-run all diagnostic modules | [B] to refresh baseline")
 
 	header := fmt.Sprintf("%s\n%s", headerText, subText)
 	sb.WriteString(CardStyle.Width(cardWidth).Render(header))
+	sb.WriteString("\n\n")
+
+	// Dedicated Section: DHCP Intelligence & Configuration Baseline
+	sb.WriteString(renderDHCPSection(m, cardWidth, textWidth))
 	sb.WriteString("\n\n")
 
 	if m.isScanningDiagnostics {
@@ -39,6 +48,10 @@ func renderDiagnosticsView(m *Model, width int) string {
 	}
 
 	for i, res := range m.diagResults {
+		// Avoid duplicate rendering if dhcp_intel is also in diagResults
+		if res.ID == "dhcp_intel" {
+			continue
+		}
 		sb.WriteString(renderDiagCard(res, cardWidth))
 		if i < len(m.diagResults)-1 {
 			sb.WriteString("\n\n")
@@ -46,6 +59,88 @@ func renderDiagnosticsView(m *Model, width int) string {
 	}
 
 	return sb.String()
+}
+
+func renderDHCPSection(m *Model, cardWidth, textWidth int) string {
+	pipe := m.poller.Status()
+	cfg := pipe.DHCPConfig
+	baseline := pipe.Baseline
+
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorCyan)
+	lblStyle := lipgloss.NewStyle().Foreground(ColorMuted).Width(16)
+	valStyle := lipgloss.NewStyle().Foreground(ColorWhite).Bold(true)
+
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("DHCP INTELLIGENCE & CONFIGURATION BASELINE"))
+	sb.WriteString("\n")
+
+	// IP Assignment Mode
+	assignMode := "Unknown / Uninspected"
+	assignColor := ColorMuted
+	if cfg != nil {
+		switch cfg.Assignment {
+		case dhcp.AssignmentDHCP:
+			assignMode = "DHCP (Dynamic Leasing)"
+			assignColor = ColorEmerald
+		case dhcp.AssignmentStatic:
+			assignMode = "Static IP (Manual)"
+			assignColor = ColorCyan
+		default:
+			assignMode = "Unknown / Unmanaged"
+		}
+	}
+	sb.WriteString(fmt.Sprintf("%s %s\n", lblStyle.Render("• IP Mode:"), lipgloss.NewStyle().Foreground(assignColor).Bold(true).Render(assignMode)))
+
+	// DHCP Server
+	dhcpServer := "None / Unavailable"
+	if cfg != nil && cfg.DHCPServerIP != "" {
+		dhcpServer = cfg.DHCPServerIP
+		if cfg.LeaseExpires != nil {
+			dhcpServer += fmt.Sprintf(" (Expires: %s)", cfg.LeaseExpires.Format("15:04:05"))
+		}
+	}
+	sb.WriteString(fmt.Sprintf("%s %s\n", lblStyle.Render("• DHCP Server:"), valStyle.Render(dhcpServer)))
+
+	// Current Gateway & DNS
+	gw := "None"
+	if cfg != nil && cfg.GatewayIP != "" {
+		gw = cfg.GatewayIP
+	} else if m.gatewayIP != "" {
+		gw = m.gatewayIP
+	}
+	sb.WriteString(fmt.Sprintf("%s %s\n", lblStyle.Render("• Gateway:"), valStyle.Render(gw)))
+
+	dnsStr := "None"
+	if cfg != nil && len(cfg.DNSServers) > 0 {
+		dnsStr = strings.Join(cfg.DNSServers, ", ")
+	}
+	sb.WriteString(fmt.Sprintf("%s %s\n", lblStyle.Render("• DNS Servers:"), valStyle.Render(dnsStr)))
+
+	// Baseline Status
+	baselineStatus := "No Baseline Established"
+	baselineColor := ColorMuted
+	if baseline != nil {
+		if len(pipe.RecentChanges) > 0 {
+			baselineStatus = fmt.Sprintf("Configuration Drift Detected (%d change(s))", len(pipe.RecentChanges))
+			baselineColor = ColorAmber
+		} else {
+			baselineStatus = fmt.Sprintf("Baseline Stable (Established: %s)", baseline.EstablishedAt.Format("15:04:05"))
+			baselineColor = ColorEmerald
+		}
+	}
+	sb.WriteString(fmt.Sprintf("%s %s\n", lblStyle.Render("• Baseline:"), lipgloss.NewStyle().Foreground(baselineColor).Bold(true).Render(baselineStatus)))
+
+	// Changes list if any
+	if len(pipe.RecentChanges) > 0 {
+		sb.WriteString("\n" + lipgloss.NewStyle().Bold(true).Foreground(ColorAmber).Render("Observed Changes from Baseline:") + "\n")
+		for _, chg := range pipe.RecentChanges {
+			sb.WriteString(fmt.Sprintf("  ⚠ %s (%s -> %s)\n", chg.FieldName, chg.OldValue, chg.NewValue))
+		}
+	}
+
+	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(ColorMuted).Render("Press [B] to refresh baseline for current interface"))
+
+	return CardStyle.Width(cardWidth).Render(sb.String())
 }
 
 func renderDiagCard(res diagnostics.DiagnosticResult, width int) string {

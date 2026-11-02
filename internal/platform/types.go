@@ -33,11 +33,31 @@ type Route struct {
 	Metric      int
 }
 
+// RouteStatus describes the routing table status and attribution certainty for an adapter.
+type RouteStatus struct {
+	HasDefaultRoute bool
+	IsPrimary       bool
+	GatewayIP       net.IP
+	InterfaceName   string
+	Metric          int
+	Details         string
+}
+
+// AttributionKind classifies measurement attribution certainty.
+type AttributionKind string
+
+const (
+	AttributionSelectedInterface AttributionKind = "SELECTED_INTERFACE"
+	AttributionSystemWide        AttributionKind = "SYSTEM_WIDE"
+	AttributionUnverified        AttributionKind = "UNVERIFIED"
+)
+
 // NetworkAdapter provides cross-platform inspection functions.
 type NetworkAdapter interface {
 	GetDefaultInterface() (*InterfaceInfo, error)
 	GetDefaultGateway() (net.IP, error)
 	GetDNSServers() ([]string, error)
 	GetARPTable() ([]NeighborEntry, error)
+	GetRouteStatus() (RouteStatus, error)
 	IsElevated() bool
 }

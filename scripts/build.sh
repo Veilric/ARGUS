@@ -23,13 +23,13 @@ mkdir -p dist
 echo "[1/2] Compiling Linux static binary (x86_64 ELF)..."
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
     -trimpath \
-    -ldflags="-s -w -X main.version=1.0.0" \
+    -ldflags="-s -w -X main.version=1.1.0" \
     -o dist/argus cmd/argus/main.go
 
 echo "[2/2] Cross-compiling Windows standalone executable (x86_64 PE)..."
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
     -trimpath \
-    -ldflags="-s -w -X main.version=1.0.0" \
+    -ldflags="-s -w -X main.version=1.1.0" \
     -o dist/argus.exe cmd/argus/main.go
 
 # Copy binaries to root for immediate USB root access

@@ -56,6 +56,22 @@ func ExportReport(
 	timestamp := time.Now()
 	tsFormatted := timestamp.Format("2006-01-02-150405")
 	baseName := fmt.Sprintf("argus-report-%s", tsFormatted)
+	mdPath = filepath.Join(outputDir, baseName+".md")
+	jsonPath = filepath.Join(outputDir, baseName+".json")
+
+	// Collision avoidance: ensure unique filename if multiple reports are exported rapidly
+	counter := 1
+	for {
+		_, mdErr := os.Stat(mdPath)
+		_, jsonErr := os.Stat(jsonPath)
+		if os.IsNotExist(mdErr) && os.IsNotExist(jsonErr) {
+			break
+		}
+		baseName = fmt.Sprintf("argus-report-%s_%d", tsFormatted, counter)
+		mdPath = filepath.Join(outputDir, baseName+".md")
+		jsonPath = filepath.Join(outputDir, baseName+".json")
+		counter++
+	}
 
 	host := HostInfo{
 		DNSServers: []string{"Unknown"},
@@ -93,19 +109,19 @@ func ExportReport(
 		RecentLogs:    recentLogs,
 	}
 
-	// 1. Export JSON report
-	jsonPath = filepath.Join(outputDir, baseName+".json")
+	// 1. Export JSON report with full error handling
 	jsonData, err := json.MarshalIndent(report, "", "  ")
-	if err == nil {
-		_ = os.WriteFile(jsonPath, jsonData, 0644)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to encode JSON incident report: %w", err)
+	}
+	if err := os.WriteFile(jsonPath, jsonData, 0644); err != nil {
+		return "", "", fmt.Errorf("failed to write JSON report to %s: %w", jsonPath, err)
 	}
 
-	// 2. Export Markdown report
-	mdPath = filepath.Join(outputDir, baseName+".md")
+	// 2. Export Markdown report with full error handling
 	mdContent := renderMarkdownReport(&report)
-	err = os.WriteFile(mdPath, []byte(mdContent), 0644)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to write markdown report: %w", err)
+	if err := os.WriteFile(mdPath, []byte(mdContent), 0644); err != nil {
+		return "", "", fmt.Errorf("failed to write markdown report to %s: %w", mdPath, err)
 	}
 
 	return mdPath, jsonPath, nil
@@ -122,10 +138,27 @@ func renderMarkdownReport(r *IncidentReport) string {
 	sb.WriteString("## 1. Executive Summary & Chain of Reachability\n\n")
 	sb.WriteString("| Component | Status | Latency | Measurement Details |\n")
 	sb.WriteString("| :--- | :--- | :--- | :--- |\n")
+	gwDetails := fmt.Sprintf("Target: `%s`", r.Host.GatewayIP)
+	if r.Pipeline.GatewayMethod != "" {
+		gwDetails += fmt.Sprintf(" (Method: %s)", r.Pipeline.GatewayMethod)
+	}
+	dnsServerLabel := r.Pipeline.DNSServer
+	if dnsServerLabel == "" {
+		dnsServerLabel = "System Resolver"
+	}
+	dnsDetails := fmt.Sprintf("Server: `%s`", dnsServerLabel)
+	if !r.Pipeline.DNSOK && r.Pipeline.DNSError != "" {
+		dnsDetails += fmt.Sprintf(" (Error: %s, Port 53 Reachable: %t)", r.Pipeline.DNSError, r.Pipeline.DNSServerReachable)
+	}
+
 	sb.WriteString(fmt.Sprintf("| **Physical Link** | %s | — | Interface: `%s` (%s) |\n", boolStatus(r.Pipeline.LinkOK), r.Host.InterfaceName, r.Host.MAC))
-	sb.WriteString(fmt.Sprintf("| **Default Gateway** | %s | %s | Target: `%s` |\n", boolStatus(r.Pipeline.GatewayOK), r.Pipeline.GatewayRTT.Round(time.Microsecond), r.Host.GatewayIP))
-	sb.WriteString(fmt.Sprintf("| **DNS Resolution** | %s | %s | Server: `%v` |\n", boolStatus(r.Pipeline.DNSOK), r.Pipeline.DNSRTT.Round(time.Microsecond), r.Host.DNSServers))
-	sb.WriteString(fmt.Sprintf("| **Internet Egress** | %s | %s | Public Egress Verified |\n", boolStatus(r.Pipeline.InternetOK), r.Pipeline.InternetRTT.Round(time.Microsecond)))
+	sb.WriteString(fmt.Sprintf("| **Default Gateway** | %s | %s | %s |\n", gatewayStatusText(r.Pipeline), r.Pipeline.GatewayRTT.Round(time.Microsecond), gwDetails))
+	sb.WriteString(fmt.Sprintf("| **DNS Resolution** | %s | %s | %s |\n", boolStatus(r.Pipeline.DNSOK), r.Pipeline.DNSRTT.Round(time.Microsecond), dnsDetails))
+	egressDetails := "Public Egress Verified"
+	if r.Pipeline.Attribution != "" {
+		egressDetails = fmt.Sprintf("Scope: %s (%s)", r.Pipeline.Attribution, r.Pipeline.AttributionDetails)
+	}
+	sb.WriteString(fmt.Sprintf("| **Internet Egress** | %s | %s | %s |\n", boolStatus(r.Pipeline.InternetOK), r.Pipeline.InternetRTT.Round(time.Microsecond), egressDetails))
 	sb.WriteString(fmt.Sprintf("| **Captive Portal** | %s | — | State: `%s` |\n\n", r.Pipeline.CaptiveState, r.Pipeline.CaptiveState))
 
 	sb.WriteString("## 2. Evidence-Based Diagnostic Findings\n\n")
@@ -148,8 +181,69 @@ func renderMarkdownReport(r *IncidentReport) string {
 		sb.WriteString("\n")
 	}
 
+	sb.WriteString("## 3. DHCP Intelligence & Network Configuration History\n\n")
+
+	dhcpMode := "Unknown / Uninspected"
+	dhcpServer := "None / Unavailable"
+	gwIP := "None"
+	dnsList := "None"
+	leaseExp := "—"
+	baselineDesc := "No Baseline Established"
+
+	if r.Pipeline.DHCPConfig != nil {
+		cfg := r.Pipeline.DHCPConfig
+		dhcpMode = string(cfg.Assignment)
+		if cfg.DHCPServerIP != "" {
+			dhcpServer = cfg.DHCPServerIP
+		}
+		if cfg.GatewayIP != "" {
+			gwIP = cfg.GatewayIP
+		}
+		if len(cfg.DNSServers) > 0 {
+			dnsList = strings.Join(cfg.DNSServers, ", ")
+		}
+		if cfg.LeaseExpires != nil {
+			leaseExp = cfg.LeaseExpires.Format("2006-01-02 15:04:05 MST")
+		}
+	} else if r.Host.GatewayIP != "" {
+		gwIP = r.Host.GatewayIP
+		if len(r.Host.DNSServers) > 0 {
+			dnsList = strings.Join(r.Host.DNSServers, ", ")
+		}
+	}
+
+	if r.Pipeline.Baseline != nil {
+		b := r.Pipeline.Baseline
+		baselineDesc = fmt.Sprintf("Established at %s (Gateway: `%s`, DNS: `%v`, DHCP: `%s`)",
+			b.EstablishedAt.Format("2006-01-02 15:04:05 MST"),
+			b.GatewayIP,
+			b.DNSServers,
+			b.DHCPServerIP,
+		)
+	}
+
+	sb.WriteString("| Property | Observed Value | Baseline Context |\n")
+	sb.WriteString("| :--- | :--- | :--- |\n")
+	sb.WriteString(fmt.Sprintf("| **IP Configuration Mode** | `%s` | Baseline Ref: %s |\n", dhcpMode, baselineDesc))
+	sb.WriteString(fmt.Sprintf("| **Default Gateway** | `%s` | Target Gateway Address |\n", gwIP))
+	sb.WriteString(fmt.Sprintf("| **Observed DHCP Server** | `%s` | Lease Server Identifier |\n", dhcpServer))
+	sb.WriteString(fmt.Sprintf("| **Configured DNS** | `%s` | Resolver List |\n", dnsList))
+	sb.WriteString(fmt.Sprintf("| **Lease Expiration** | `%s` | Dynamic Lease Lifecycle |\n\n", leaseExp))
+
+	if len(r.Pipeline.RecentChanges) > 0 {
+		sb.WriteString("### Observed Configuration Drift\n\n")
+		for _, chg := range r.Pipeline.RecentChanges {
+			sb.WriteString(fmt.Sprintf("- **%s:** `%s` → `%s` (Observed at %s)\n",
+				chg.FieldName, chg.OldValue, chg.NewValue, chg.Timestamp.Format("2006-01-02 15:04:05 MST")))
+			sb.WriteString(fmt.Sprintf("  - *Analysis:* %s\n", chg.Implication))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("> *Notice: DHCP inspection relies on local operating system state and lease metadata. ARGUS operates strictly read-only and does not transmit rogue-server solicitations or inject packets.*\n\n")
+
 	if len(r.Devices) > 0 {
-		sb.WriteString("## 3. Discovered Local Subnet Inventory\n\n")
+		sb.WriteString("## 4. Discovered Local Subnet Inventory\n\n")
 		sb.WriteString("| IP Address | MAC Address | Hardware Vendor | Interface | State |\n")
 		sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
 		for _, dev := range r.Devices {
@@ -159,7 +253,7 @@ func renderMarkdownReport(r *IncidentReport) string {
 	}
 
 	if len(r.RecentLogs) > 0 {
-		sb.WriteString("## 4. Recent Incident Log Feed\n\n```text\n")
+		sb.WriteString("## 5. Recent Incident Log Feed\n\n```text\n")
 		for _, log := range r.RecentLogs {
 			sb.WriteString(log + "\n")
 		}
@@ -168,6 +262,19 @@ func renderMarkdownReport(r *IncidentReport) string {
 
 	sb.WriteString("---\n*Report generated autonomously by ARGUS by Veilric.*\n")
 	return sb.String()
+}
+
+func gatewayStatusText(s telemetry.PipelineStatus) string {
+	switch s.GatewayState {
+	case "REACHABLE":
+		return "✔ ONLINE"
+	case "INCONCLUSIVE":
+		return "? INCONCLUSIVE (Silent/Unverified)"
+	case "UNAVAILABLE":
+		return "— UNAVAILABLE (No Gateway Route)"
+	default:
+		return "✗ OFFLINE / UNREACHABLE"
+	}
 }
 
 func boolStatus(b bool) string {

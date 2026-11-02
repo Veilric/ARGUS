@@ -1,0 +1,13 @@
+# Local user configuration & baseline store
+config/baselines.json
+
+# Session event logs
+logs/*.log
+!logs/.gitkeep
+
+# OS / Editor temporary files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~

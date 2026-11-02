@@ -11,7 +11,7 @@ type IPConflictCheck struct{}
 
 func (c *IPConflictCheck) ID() string          { return "ip_conflict" }
 func (c *IPConflictCheck) Name() string        { return "IP Address Conflict & ARP Inconsistency" }
-func (c *IPConflictCheck) Description() string { return "Detects duplicate IP assignments where another machine claims this host's IP" }
+func (c *IPConflictCheck) Description() string { return "Inspects ARP mappings to detect duplicate IP assignments claiming this host's IP" }
 
 func (c *IPConflictCheck) Run(ctx context.Context, netCtx *NetworkContext) (*DiagnosticResult, error) {
 	if len(netCtx.LocalIPs) == 0 {
@@ -20,7 +20,7 @@ func (c *IPConflictCheck) Run(ctx context.Context, netCtx *NetworkContext) (*Dia
 			Title:     c.Name(),
 			Category:  CategoryInconclusive,
 			Severity:  SeverityInfo,
-			Summary:   "No local IP addresses to check for conflicts",
+			Summary:   "No local IP addresses available to evaluate for conflicts",
 			Evidence:  []string{"Local IP list is empty"},
 			Timestamp: time.Now(),
 		}, nil
@@ -35,7 +35,7 @@ func (c *IPConflictCheck) Run(ctx context.Context, netCtx *NetworkContext) (*Dia
 
 		if macInTable, found := netCtx.ARPTable[ownIP]; found {
 			normalizedTableMAC := strings.ToLower(strings.TrimSpace(macInTable))
-			if normalizedTableMAC != normalizedOwnMAC && normalizedTableMAC != "00:00:00:00:00:00" {
+			if normalizedTableMAC != normalizedOwnMAC && normalizedTableMAC != "00:00:00:00:00:00" && normalizedTableMAC != "incomplete" {
 				return &DiagnosticResult{
 					ID:       c.ID(),
 					Title:    c.Name(),
@@ -48,7 +48,7 @@ func (c *IPConflictCheck) Run(ctx context.Context, netCtx *NetworkContext) (*Dia
 						fmt.Sprintf("Conflicting Remote Device MAC: %s", macInTable),
 						"Local ARP cache maps host IP to a foreign hardware address",
 					},
-					Remediation: "Another machine is using this static IP. Change host IP address or disconnect the conflicting device.",
+					Remediation: "Another machine is active with this IP. Change host IP address, configure DHCP, or locate and disconnect the conflicting device.",
 					Timestamp:   time.Now(),
 				}, nil
 			}
@@ -58,21 +58,17 @@ func (c *IPConflictCheck) Run(ctx context.Context, netCtx *NetworkContext) (*Dia
 	evidence := []string{
 		fmt.Sprintf("Local IPs verified: %v", netCtx.LocalIPs),
 		fmt.Sprintf("Local MAC: %s", netCtx.MACAddress),
-		fmt.Sprintf("Total ARP neighbors evaluated: %d", len(netCtx.ARPTable)),
-	}
-
-	if netCtx.IsElevated {
-		evidence = append(evidence, "Mode: Elevated (active ARP verification enabled)")
-	} else {
-		evidence = append(evidence, "Mode: Standard User (passive ARP table verification)")
+		fmt.Sprintf("Total ARP cache neighbors evaluated: %d", len(netCtx.ARPTable)),
+		"Verification Scope: Passive system ARP cache inspection",
+		"Absence of duplicate ARP entries in cache does not prove address uniqueness across silent or uncontacted broadcast domain hosts",
 	}
 
 	return &DiagnosticResult{
 		ID:        c.ID(),
 		Title:     c.Name(),
-		Category:  CategoryHealthy,
-		Severity:  SeverityNone,
-		Summary:   "No IP address conflicts detected. Local IP is unique on LAN.",
+		Category:  CategoryInconclusive,
+		Severity:  SeverityInfo,
+		Summary:   "No conflicting address evidence observed in the available neighbor data. IP uniqueness has not been verified.",
 		Evidence:  evidence,
 		Timestamp: time.Now(),
 	}, nil
