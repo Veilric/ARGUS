@@ -35,8 +35,8 @@ func setupTestModel() *Model {
 			Title:       "Physical Link & Interface Carrier",
 			Category:    diagnostics.CategoryHealthy,
 			Severity:    diagnostics.SeverityNone,
-			Summary:     "Interface enp6s0 is UP with 2 IP addresses assigned",
-			Evidence:    []string{"Primary Interface: enp6s0", "MAC Address: 02:00:00:00:00:01", "Local IPs: [192.0.2.100/24]"},
+			Summary:     "Interface eth0 is UP with 2 IP addresses assigned",
+			Evidence:    []string{"Primary Interface: eth0", "MAC Address: 02:00:00:00:00:01", "Local IPs: [192.0.2.100/24]"},
 			Timestamp:   time.Now(),
 		},
 		{

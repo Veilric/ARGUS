@@ -9,14 +9,14 @@ import (
 )
 
 const sampleNMCLIWithDHCP = `
-IP4.ADDRESS[1]:192.0.2.100/24
-IP4.GATEWAY:192.0.2.1
-IP4.DNS[1]:192.0.2.1
+IP4.ADDRESS[1]:192.168.1.100/24
+IP4.GATEWAY:192.168.1.1
+IP4.DNS[1]:192.168.1.1
 IP4.DOMAIN[1]:corp.local
-DHCP4.OPTION[1]:dhcp_client_identifier = 01:02:00:00:00:00:01
+DHCP4.OPTION[1]:dhcp_client_identifier = 01:00:11:22:33:44:55
 DHCP4.OPTION[2]:dhcp_lease_time = 86400
-DHCP4.OPTION[3]:dhcp_server_identifier = 192.0.2.1
-DHCP4.OPTION[4]:domain_name_servers = 192.0.2.1 1.1.1.1
+DHCP4.OPTION[3]:dhcp_server_identifier = 192.168.1.1
+DHCP4.OPTION[4]:domain_name_servers = 192.168.1.1 1.1.1.1
 DHCP4.OPTION[5]:expiry = 1793678098
 `
 
@@ -77,17 +77,17 @@ func TestDHCP_Retrieval_NetworkManager(t *testing.T) {
 	if cfg.Assignment != AssignmentDHCP {
 		t.Errorf("expected AssignmentDHCP, got %v", cfg.Assignment)
 	}
-	if cfg.IPv4Address != "192.0.2.100" || cfg.IPv4Prefix != 24 {
-		t.Errorf("expected 192.0.2.100/24, got %s/%d", cfg.IPv4Address, cfg.IPv4Prefix)
+	if cfg.IPv4Address != "192.168.1.100" || cfg.IPv4Prefix != 24 {
+		t.Errorf("expected 192.168.1.100/24, got %s/%d", cfg.IPv4Address, cfg.IPv4Prefix)
 	}
-	if cfg.GatewayIP != "192.0.2.1" {
-		t.Errorf("expected gateway 192.0.2.1, got %s", cfg.GatewayIP)
+	if cfg.GatewayIP != "192.168.1.1" {
+		t.Errorf("expected gateway 192.168.1.1, got %s", cfg.GatewayIP)
 	}
-	if cfg.DHCPServerIP != "192.0.2.1" {
-		t.Errorf("expected dhcp server 192.0.2.1, got %s", cfg.DHCPServerIP)
+	if cfg.DHCPServerIP != "192.168.1.1" {
+		t.Errorf("expected dhcp server 192.168.1.1, got %s", cfg.DHCPServerIP)
 	}
-	if len(cfg.DNSServers) == 0 || cfg.DNSServers[0] != "192.0.2.1" {
-		t.Errorf("expected DNS 192.0.2.1, got %v", cfg.DNSServers)
+	if len(cfg.DNSServers) == 0 || cfg.DNSServers[0] != "192.168.1.1" {
+		t.Errorf("expected DNS 192.168.1.1, got %v", cfg.DNSServers)
 	}
 	if cfg.LeaseExpires == nil {
 		t.Errorf("expected lease expiration timestamp to be parsed")

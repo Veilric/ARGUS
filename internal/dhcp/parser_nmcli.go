@@ -35,7 +35,7 @@ func ParseNMCLI(output string, ifaceName string) (*DHCPConfig, error) {
 		val := strings.TrimSpace(parts[1])
 
 		if strings.HasPrefix(key, "IP4.ADDRESS") {
-			// e.g. 192.0.2.100/24
+			// e.g. 192.168.1.100/24
 			if ip, ipNet, err := net.ParseCIDR(val); err == nil && ip.To4() != nil {
 				cfg.IPv4Address = ip.String()
 				ones, _ := ipNet.Mask.Size()
@@ -56,7 +56,7 @@ func ParseNMCLI(output string, ifaceName string) (*DHCPConfig, error) {
 			}
 		} else if strings.HasPrefix(key, "DHCP4.OPTION") {
 			hasDHCP = true
-			// e.g. dhcp_server_identifier = 192.0.2.1
+			// e.g. dhcp_server_identifier = 192.168.1.1
 			optParts := strings.SplitN(val, "=", 2)
 			if len(optParts) == 2 {
 				optName := strings.TrimSpace(optParts[0])

@@ -1,13 +1,38 @@
-# Local user configuration & baseline store
-config/baselines.json
+# ==============================================================================
+# ARGUS by Veilric — Git Ignore Rules
+# ==============================================================================
 
-# Session event logs
-logs/*.log
+# Local Network Configuration Baselines
+# Persistent machine-specific baseline profiles created at runtime
+config/*
+!config/.gitkeep
+
+# Session Event & Operational Logs
+# Rotating logs created during active monitoring and discovery
+logs/*
 !logs/.gitkeep
 
-# OS / Editor temporary files
-.DS_Store
-Thumbs.db
+# Generated Diagnostic & Incident Reports
+# User-generated network reports containing local internal network data
+reports/*
+!reports/.gitkeep
+
+# Temporary & Working Files
+*.tmp
+*.bak
+*~
 *.swp
 *.swo
-*~
+.~lock.*
+.#*
+
+# Operating System & IDE Artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Test & Coverage Outputs
+*.test
+*.out
+coverage.*

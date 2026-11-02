@@ -141,32 +141,40 @@ Generated incident reports feature standardized executive summaries and evidence
 ## 1. Executive Summary & Chain of Reachability
 | Component | Status | Latency | Measurement Details |
 | :--- | :--- | :--- | :--- |
-| **Physical Link** | ✔ ONLINE | — | Interface: `enp6s0` (02:00:00:00:00:01) |
-| **Default Gateway** | ✔ ONLINE | 1.596ms | Target: `192.0.2.1` |
-| **DNS Resolution** | ✔ ONLINE | 108µs | Server: `[127.0.0.53]` |
-| **Internet Egress** | ✔ ONLINE | 5.914ms | Public Egress Verified |
+| **Physical Link** | ✔ ONLINE | — | Interface: `eth0` (02:00:00:00:00:01) |
+| **Default Gateway** | ✔ ONLINE | 1.150ms | Target: `192.0.2.1` |
+| **DNS Resolution** | ✔ ONLINE | 450µs | Server: `[192.0.2.1]` |
+| **Internet Egress** | ✔ ONLINE | 12.340ms | Public Egress Verified |
 | **Captive Portal** | CLEAN | — | State: `CLEAN` |
 
 ## 2. Evidence-Based Diagnostic Findings
 ### [HEALTHY] ISP WAN Outage vs DNS Server Failure Isolation
 - **Classification:** `HEALTHY` (Severity: `NONE`)
-- **Summary:** Internet and DNS healthy (Egress: 5ms, DNS: 7ms)
+- **Summary:** Internet and DNS healthy (Egress: 12ms, DNS: 1ms)
 - **Evidence Backing:**
-  - Raw Public IP Reachability: true (5ms via 1.1.1.1:443)
-  - DNS Resolution ('one.one.one.one'): true (7ms)
-  - Configured System DNS: [127.0.0.53]
+  - Raw Public IP Reachability: true (12ms via 1.1.1.1:443)
+  - DNS Resolution ('one.one.one.one'): true (1ms)
+  - Configured System DNS: [192.0.2.1]
 
 ## 3. DHCP Intelligence & Network Configuration History
 | Parameter | Current Observation | Baseline Reference | Status |
 | :--- | :--- | :--- | :--- |
-| **Interface** | `enp6s0` (02:00:00:00:00:01) | `enp6s0` | Match |
+| **Interface** | `eth0` (02:00:00:00:00:01) | `eth0` | Match |
 | **Assignment** | DHCP | DHCP | Match |
-| **Assigned IPv4** | `192.168.1.50/24` | `192.168.1.50/24` | Match |
-| **Default Gateway**| `192.168.1.1` | `192.168.1.1` | Match |
-| **DNS Resolvers** | `[192.168.1.1]` | `[192.168.1.1]` | Match |
-| **DHCP Server** | `192.168.1.1` | `192.168.1.1` | Match |
-| **Lease Expiry** | 2026-11-03 14:00:00 PST | — | Active |
+| **Assigned IPv4** | `192.0.2.100/24` | `192.0.2.100/24` | Match |
+| **Default Gateway**| `192.0.2.1` | `192.0.2.1` | Match |
+| **DNS Resolvers** | `[192.0.2.1]` | `[192.0.2.1]` | Match |
+| **DHCP Server** | `192.0.2.1` | `192.0.2.1` | Match |
+| **Lease Expiry** | 2026-11-03 12:00:00 UTC | — | Active |
 ```
+
+---
+
+## 🔒 Privacy & Operational Security
+
+- **Local Diagnostic Collection**: ARGUS inspects local network configuration and interface carrier state purely on the local machine. It collects local IP addresses, MAC addresses, gateway configurations, and DHCP lease information necessary for network triage.
+- **Report Sanitization Notice**: Generated diagnostic reports (`./reports/`) and session logs (`./logs/`) contain factual internal network details. Before sharing reports publicly or attaching them to issue tickets, review and sanitize any internal topology identifiers.
+- **Source Control Safety**: By default, `.gitignore` excludes all generated incident reports (`reports/*.md`, `reports/*.json`), session event logs (`logs/*.log`), and persistent baselines (`config/baselines.json`) to prevent accidental disclosure when contributing to version-controlled repositories.
 
 ---
 *ARGUS by Veilric — Autonomous Network Observation, Diagnostics & Discovery.*

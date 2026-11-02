@@ -1,0 +1,122 @@
+{
+  "brand": "ARGUS by Veilric",
+  "timestamp": "2026-11-02T12:00:00Z",
+  "elevation_mode": "[USER]",
+  "host": {
+    "hostname": "workstation-demo",
+    "interface_name": "eth0",
+    "mac": "02:00:00:00:00:01",
+    "ips": [
+      "192.0.2.100/24"
+    ],
+    "gateway_ip": "192.0.2.1",
+    "dns_servers": [
+      "192.0.2.1"
+    ]
+  },
+  "pipeline": {
+    "link_ok": true,
+    "gateway_ok": true,
+    "gateway_state": "REACHABLE",
+    "gateway_method": "TCP SYN-ACK (port 80)",
+    "gateway_ip": "192.0.2.1",
+    "gateway_mac": "02:00:00:00:00:02",
+    "gateway_rtt": 1150000,
+    "dns_ok": true,
+    "dns_rtt": 450000,
+    "dns_server": "192.0.2.1",
+    "dns_server_reachable": true,
+    "dns_error": "",
+    "internet_ok": true,
+    "internet_rtt": 12340000,
+    "captive_state": "CLEAN",
+    "public_ip": "198.51.100.50",
+    "isp_name": "Example ISP",
+    "attribution": "SELECTED_INTERFACE",
+    "attribution_details": "System-wide primary default route via eth0",
+    "dhcp_config": {
+      "interface_name": "eth0",
+      "mac_address": "02:00:00:00:00:01",
+      "ipv4_address": "192.0.2.100",
+      "ipv4_prefix": 24,
+      "assignment": "DHCP",
+      "gateway_ip": "192.0.2.1",
+      "dns_servers": [
+        "192.0.2.1"
+      ],
+      "dhcp_server_ip": "192.0.2.1",
+      "lease_expires": "2026-11-03T12:00:00Z",
+      "source": "NetworkManager",
+      "observed_at": "2026-11-02T12:00:00Z"
+    },
+    "baseline": {
+      "interface_name": "eth0",
+      "mac_address": "02:00:00:00:00:01",
+      "ipv4_address": "192.0.2.100",
+      "ipv4_prefix": 24,
+      "assignment": "DHCP",
+      "gateway_ip": "192.0.2.1",
+      "dns_servers": [
+        "192.0.2.1"
+      ],
+      "dhcp_server_ip": "192.0.2.1",
+      "established_at": "2026-11-02T08:00:00Z",
+      "last_seen_at": "2026-11-02T12:00:00Z"
+    }
+  },
+  "diagnostics": [
+    {
+      "id": "link_carrier",
+      "title": "Physical Link & Interface Carrier",
+      "category": "HEALTHY",
+      "severity": "NONE",
+      "summary": "Interface eth0 is UP with 1 IP address(es)",
+      "evidence": [
+        "Primary Interface: eth0",
+        "MAC Address: 02:00:00:00:00:01",
+        "Local IPs: [192.0.2.100/24]"
+      ],
+      "timestamp": "2026-11-02T12:00:00Z"
+    },
+    {
+      "id": "dhcp_intel",
+      "title": "DHCP Intelligence & Configuration Baseline",
+      "category": "HEALTHY",
+      "severity": "NONE",
+      "summary": "Network configuration matches established baseline (DHCP mode stable)",
+      "evidence": [
+        "Observed Interface: eth0 (MAC: 02:00:00:00:00:01)",
+        "IP Configuration Mode: DHCP (Source: NetworkManager)",
+        "Assigned IPv4: 192.0.2.100/24",
+        "Configured Gateway: 192.0.2.1",
+        "Configured DNS Resolvers: [192.0.2.1]",
+        "Observed DHCP Server ID: 192.0.2.1",
+        "DHCP Lease Expiration: 2026-11-03 12:00:00 UTC",
+        "Baseline Established: 2026-11-02 08:00:00 UTC (Last Seen: 2026-11-02 12:00:00 UTC)",
+        "Baseline Values: Gateway: 192.0.2.1, DNS: [192.0.2.1], DHCP Server: 192.0.2.1"
+      ],
+      "timestamp": "2026-11-02T12:00:00Z"
+    }
+  ],
+  "devices": [
+    {
+      "ip": "192.0.2.1",
+      "mac": "02:00:00:00:00:02",
+      "vendor": "Example Router",
+      "interface": "eth0",
+      "state": "REACHABLE",
+      "hostname": "gateway.internal"
+    },
+    {
+      "ip": "192.0.2.10",
+      "mac": "02:00:00:00:00:10",
+      "vendor": "Example Printer",
+      "interface": "eth0",
+      "state": "REACHABLE",
+      "hostname": "printer.internal"
+    }
+  ],
+  "event_logs": [
+    "[12:00:00] [INFO] Real-time telemetry monitoring started"
+  ]
+}
